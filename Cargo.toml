@@ -1,10 +1,10 @@
 [package]
 name = "beacon"
 version = "0.1.0"
-authors = ["unexcellent <>"]
-edition = "2021"
+authors = ["unexcellent"]
+edition = "2024"
 resolver = "2"
-rust-version = "1.82"
+rust-version = "1.97"
 
 [[bin]]
 name = "beacon"
