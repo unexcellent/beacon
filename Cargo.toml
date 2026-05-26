@@ -1,12 +1,12 @@
 [package]
-name = "beacon-rs"
+name = "beacon"
 version = "0.1.0"
 edition = "2024"
 resolver = "2"
 rust-version = "1.97"
 
 [[bin]]
-name = "beacon-rs"
+name = "beacon"
 harness = false
 
 [profile.release]
@@ -26,7 +26,7 @@ log = "0.4"
 esp-idf-sys = "0.37"
 esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
 esp-idf-hal = "0.46.2"
-sstv = { path = "../sstv" }
+sstv = { git = "https://github.com/unexcellent/sstv.git", branch = "dev" }
 
 [build-dependencies]
 embuild = "0.33"
