@@ -3,24 +3,34 @@ use std::f32::consts::PI;
 use std::ptr;
 
 use esp_idf_sys::{
-    esp, i2s_chan_config_t, i2s_chan_handle_t, i2s_channel_disable, i2s_channel_enable,
-    i2s_channel_init_std_mode, i2s_channel_write, i2s_del_channel, i2s_new_channel,
-    i2s_std_clk_config_t, i2s_std_config_t, i2s_std_gpio_config_t, i2s_std_slot_config_t,
     EspError,
-    // Clock source — I2S_CLK_SRC_DEFAULT (= 0) maps to XTAL on ESP32-P4 rev < 3.0.
-    // PLL_F160M (the hal default) is only valid on rev ≥ 3.0 and asserts otherwise.
-    soc_periph_i2s_clk_src_t_I2S_CLK_SRC_DEFAULT as CLK_DEFAULT,
+    esp,
+    // GPIO
+    gpio_num_t_GPIO_NUM_NC as GPIO_NC,
+    i2s_chan_config_t,
+    i2s_chan_handle_t,
+    i2s_channel_disable,
+    i2s_channel_enable,
+    i2s_channel_init_std_mode,
+    i2s_channel_write,
     // Slot / bit-width
     i2s_data_bit_width_t_I2S_DATA_BIT_WIDTH_16BIT as BW_16,
-    i2s_slot_bit_width_t_I2S_SLOT_BIT_WIDTH_AUTO as SLOT_AUTO,
-    i2s_slot_mode_t_I2S_SLOT_MODE_STEREO as STEREO,
-    i2s_std_slot_mask_t_I2S_STD_SLOT_BOTH as SLOT_BOTH,
+    i2s_del_channel,
     i2s_mclk_multiple_t_I2S_MCLK_MULTIPLE_256 as MCLK_256,
+    i2s_new_channel,
     // Channel / role
     i2s_port_t_I2S_NUM_0 as I2S0,
     i2s_role_t_I2S_ROLE_MASTER as MASTER,
-    // GPIO
-    gpio_num_t_GPIO_NUM_NC as GPIO_NC,
+    i2s_slot_bit_width_t_I2S_SLOT_BIT_WIDTH_AUTO as SLOT_AUTO,
+    i2s_slot_mode_t_I2S_SLOT_MODE_STEREO as STEREO,
+    i2s_std_clk_config_t,
+    i2s_std_config_t,
+    i2s_std_gpio_config_t,
+    i2s_std_slot_config_t,
+    i2s_std_slot_mask_t_I2S_STD_SLOT_BOTH as SLOT_BOTH,
+    // Clock source — I2S_CLK_SRC_DEFAULT (= 0) maps to XTAL on ESP32-P4 rev < 3.0.
+    // PLL_F160M (the hal default) is only valid on rev ≥ 3.0 and asserts otherwise.
+    soc_periph_i2s_clk_src_t_I2S_CLK_SRC_DEFAULT as CLK_DEFAULT,
 };
 use sstv::{Encoder, Mode, RgbPixel};
 
@@ -33,7 +43,7 @@ const SAMPLE_RATE: u32 = 16_000;
 const PIN_MCLK: i32 = 20; // SCK
 const PIN_BCLK: i32 = 21; // BCK
 const PIN_DOUT: i32 = 22; // DIN on DAC side
-const PIN_WS:   i32 = 23; // LRCK
+const PIN_WS: i32 = 23; // LRCK
 
 // 512-sample chunks × 4 bytes/frame (stereo 16-bit) = 2 KB stack buffer per flush.
 const CHUNK_SAMPLES: usize = 512;
@@ -106,7 +116,9 @@ impl I2sTx {
 
 impl I2sTx {
     fn disable(&mut self) {
-        unsafe { let _ = i2s_channel_disable(self.0); }
+        unsafe {
+            let _ = i2s_channel_disable(self.0);
+        }
     }
 
     fn enable(&mut self) -> Result<(), EspError> {
@@ -158,8 +170,8 @@ fn transmit(i2s: &mut I2sTx) {
     let mut sample_adjust = 0.0f32;
 
     for tone in encoder {
-        let freq = tone.0.hz() as f32;
-        let duration_sec = tone.1.ns() as f32 / 1_000_000_000.0;
+        let freq = tone.frequency.hz() as f32;
+        let duration_sec = tone.duration.ns() as f32 / 1_000_000_000.0;
 
         let exact_samples = duration_sec * SAMPLE_RATE as f32 + sample_adjust;
         let num_samples = exact_samples.round() as usize;
@@ -171,10 +183,10 @@ fn transmit(i2s: &mut I2sTx) {
             let sample = (phase.sin() * i16::MAX as f32) as i16;
             let [lo, hi] = sample.to_le_bytes();
 
-            buf[buf_pos]     = 0;   // left lo  (silent)
-            buf[buf_pos + 1] = 0;   // left hi  (silent)
-            buf[buf_pos + 2] = lo;  // right lo (audio)
-            buf[buf_pos + 3] = hi;  // right hi (audio)
+            buf[buf_pos] = 0; // left lo  (silent)
+            buf[buf_pos + 1] = 0; // left hi  (silent)
+            buf[buf_pos + 2] = lo; // right lo (audio)
+            buf[buf_pos + 3] = hi; // right hi (audio)
             buf_pos += 4;
 
             phase = (phase + phase_step) % (2.0 * PI);
