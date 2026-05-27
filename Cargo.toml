@@ -1,3 +1,5 @@
+cargo-features = ["panic-immediate-abort"]
+
 [package]
 name = "beacon"
 version = "0.1.0"
@@ -10,7 +12,10 @@ name = "beacon"
 harness = false
 
 [profile.release]
-opt-level = "s"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "immediate-abort"
 
 [profile.dev]
 debug = true
@@ -25,7 +30,6 @@ esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git" }
 log = "0.4"
 esp-idf-sys = "0.37"
 esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
-esp-idf-hal = "0.46.2"
 sstv = { git = "https://github.com/unexcellent/sstv.git", branch = "dev" }
 
 [build-dependencies]
