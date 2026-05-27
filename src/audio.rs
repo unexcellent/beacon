@@ -4,29 +4,101 @@ use std::ptr;
 use esp_idf_sys::{
     EspError, esp, gpio_num_t_GPIO_NUM_NC as GPIO_NC, i2s_chan_config_t, i2s_chan_handle_t,
     i2s_channel_disable, i2s_channel_enable, i2s_channel_init_std_mode, i2s_channel_write,
-    i2s_data_bit_width_t_I2S_DATA_BIT_WIDTH_16BIT as BW_16, i2s_del_channel,
+    i2s_data_bit_width_t_I2S_DATA_BIT_WIDTH_16BIT as BW_16,
+    i2s_data_bit_width_t_I2S_DATA_BIT_WIDTH_24BIT as BW_24, i2s_del_channel,
     i2s_mclk_multiple_t_I2S_MCLK_MULTIPLE_256 as MCLK_256, i2s_new_channel,
     i2s_port_t_I2S_NUM_0 as I2S0, i2s_role_t_I2S_ROLE_MASTER as MASTER,
     i2s_slot_bit_width_t_I2S_SLOT_BIT_WIDTH_AUTO as SLOT_AUTO,
-    i2s_slot_mode_t_I2S_SLOT_MODE_STEREO as STEREO, i2s_std_clk_config_t, i2s_std_config_t,
-    i2s_std_gpio_config_t, i2s_std_slot_config_t,
+    i2s_slot_mode_t_I2S_SLOT_MODE_MONO as MONO, i2s_slot_mode_t_I2S_SLOT_MODE_STEREO as STEREO,
+    i2s_std_clk_config_t, i2s_std_config_t, i2s_std_gpio_config_t, i2s_std_slot_config_t,
     i2s_std_slot_mask_t_I2S_STD_SLOT_BOTH as SLOT_BOTH,
+    i2s_std_slot_mask_t_I2S_STD_SLOT_LEFT as SLOT_LEFT,
+    i2s_std_slot_mask_t_I2S_STD_SLOT_RIGHT as SLOT_RIGHT,
     soc_periph_i2s_clk_src_t_I2S_CLK_SRC_DEFAULT as CLK_DEFAULT,
 };
 
-pub const SAMPLE_RATE: u32 = 16_000;
+/// Describes the serial data format expected by a DAC or audio codec.
+///
+/// These settings map directly to the I2S slot configuration and determine
+/// how samples are packed on the wire.
+pub struct AudioEncoder {
+    /// Use 16-bit samples (`true`) or 24-bit samples (`false`).
+    pub width_16bit: bool,
+    /// Transmit both left and right channels (`true`) or a single mono channel (`false`).
+    pub stereo: bool,
+    /// Delay data by one BCLK cycle relative to WS (Philips I2S standard). Set `false` for left-justified format.
+    pub bit_shift: bool,
+    /// In stereo mode: which channel carries the audio signal (`true` = left, `false` = right).
+    /// In mono mode: which I2S slot to use (`true` = left/WS-low, `false` = right/WS-high).
+    pub left_channel: bool,
+    /// Transmit the most significant byte first (`true`) or least significant byte first (`false`).
+    pub big_endian: bool,
+    /// Transmit the least significant bit first within each byte (`true`) or most significant bit first (`false`).
+    pub least_significant_bit_first: bool,
+    /// Align sample data to the left (MSB) edge of the slot (`true`) or right (LSB) edge (`false`).
+    pub left_align_data: bool,
+}
 
-const PIN_MCLK: i32 = 20; // SCK
-const PIN_BCLK: i32 = 21; // BCK
-const PIN_DOUT: i32 = 22; // DIN on DAC side
-const PIN_WS: i32 = 23; // LRCK
+/// Encoder configuration for the PCM5102A 16-bit stereo DAC.
+///
+/// Uses the Philips I2S standard: 16-bit samples, stereo, MSB-first, audio on the right channel.
+pub const PCM5102A: AudioEncoder = AudioEncoder {
+    width_16bit: true,
+    stereo: true,
+    bit_shift: true,
+    left_channel: false,
+    big_endian: false,
+    least_significant_bit_first: false,
+    left_align_data: false,
+};
 
-pub const CHUNK_SAMPLES: usize = 512;
+/// Describes the physical I2S bus configuration: timing, pins, and DMA chunk size.
+pub struct AudioInterface {
+    /// Audio sample rate in Hz.
+    pub sample_rate: u32,
+    /// BCLK divider applied to MCLK (BCLK = MCLK / clock_divider).
+    pub clock_divider: u32,
+    /// GPIO pin number for MCLK (master clock).
+    pub mclk_pin: u8,
+    /// GPIO pin number for BCLK (bit clock).
+    pub bclk_pin: u8,
+    /// GPIO pin number for DOUT (serial data out).
+    pub dout_pin: u8,
+    /// GPIO pin number for WS (word select / left-right clock).
+    pub ws_pin: u8,
+    /// Number of samples per DMA write. Larger values increase latency but reduce CPU overhead.
+    pub chunk_size: usize,
+}
 
-pub struct I2s(i2s_chan_handle_t);
+/// Interface configuration for the Philips I2S standard at 16 kHz on the ESP32-P4.
+///
+/// MCLK = 256 × 16 000 Hz = 4.096 MHz. BCLK = MCLK / 8 = 512 kHz,
+/// which exactly satisfies the 16 kHz × 2 channels × 16 bits = 512 kHz requirement.
+pub const PHILLIPS_I2S: AudioInterface = AudioInterface {
+    sample_rate: 16_000,
+    clock_divider: 8,
+    mclk_pin: 20,
+    bclk_pin: 21,
+    dout_pin: 22,
+    ws_pin: 23,
+    chunk_size: 512,
+};
 
-impl I2s {
-    pub fn new() -> Result<Self, EspError> {
+/// An active I2S transmit channel configured for a specific encoder and interface.
+///
+/// The channel is created in a disabled state. Call [`enable`](AudioChannel::enable)
+/// before transmitting and [`disable`](AudioChannel::disable) when done.
+/// The underlying hardware channel is released automatically on drop.
+pub struct AudioChannel {
+    inner: i2s_chan_handle_t,
+}
+
+impl AudioChannel {
+    /// Creates and configures a new I2S TX channel.
+    ///
+    /// Allocates the ESP-IDF I2S channel and applies the standard-mode configuration
+    /// derived from `encoder` and `interface`. The channel is left disabled after creation.
+    pub fn new(encoder: AudioEncoder, interface: AudioInterface) -> Result<Self, EspError> {
         let chan_cfg = i2s_chan_config_t {
             id: I2S0,
             role: MASTER,
@@ -38,31 +110,41 @@ impl I2s {
         let mut tx: i2s_chan_handle_t = ptr::null_mut();
         unsafe { esp!(i2s_new_channel(&chan_cfg, &mut tx, ptr::null_mut()))? };
 
+        let data_bit_width = if encoder.width_16bit { BW_16 } else { BW_24 };
+        let ws_width = if encoder.width_16bit { 16 } else { 24 };
+        let (slot_mode, slot_mask) = if encoder.stereo {
+            (STEREO, SLOT_BOTH)
+        } else if encoder.left_channel {
+            (MONO, SLOT_LEFT)
+        } else {
+            (MONO, SLOT_RIGHT)
+        };
+
         let std_cfg = i2s_std_config_t {
             clk_cfg: i2s_std_clk_config_t {
-                sample_rate_hz: SAMPLE_RATE,
+                sample_rate_hz: interface.sample_rate,
                 clk_src: CLK_DEFAULT,
                 ext_clk_freq_hz: 0,
                 mclk_multiple: MCLK_256,
-                bclk_div: 8,
+                bclk_div: interface.clock_divider,
             },
             slot_cfg: i2s_std_slot_config_t {
-                data_bit_width: BW_16,
+                data_bit_width,
                 slot_bit_width: SLOT_AUTO,
-                slot_mode: STEREO,
-                slot_mask: SLOT_BOTH,
-                ws_width: 16,
+                slot_mode,
+                slot_mask,
+                ws_width,
                 ws_pol: false,
-                bit_shift: true,
-                left_align: false,
-                big_endian: false,
-                bit_order_lsb: false,
+                bit_shift: encoder.bit_shift,
+                left_align: encoder.left_align_data,
+                big_endian: encoder.big_endian,
+                bit_order_lsb: encoder.least_significant_bit_first,
             },
             gpio_cfg: i2s_std_gpio_config_t {
-                mclk: PIN_MCLK,
-                bclk: PIN_BCLK,
-                ws: PIN_WS,
-                dout: PIN_DOUT,
+                mclk: interface.mclk_pin as i32,
+                bclk: interface.bclk_pin as i32,
+                ws: interface.ws_pin as i32,
+                dout: interface.dout_pin as i32,
                 din: GPIO_NC,
                 invert_flags: Default::default(),
             },
@@ -70,38 +152,46 @@ impl I2s {
 
         unsafe { esp!(i2s_channel_init_std_mode(tx, &std_cfg))? };
 
-        Ok(Self(tx))
+        Ok(Self { inner: tx })
     }
 
-    pub fn write_all(&mut self, data: &[u8]) -> Result<(), EspError> {
-        let mut written = 0usize;
-        unsafe {
-            esp!(i2s_channel_write(
-                self.0,
-                data.as_ptr() as *const c_void,
-                data.len(),
-                &mut written,
-                u32::MAX,
-            ))
+    /// Writes all bytes in `data` to the I2S DMA buffer, blocking until complete.
+    pub fn transmit(&mut self, data: &[u8]) -> Result<(), EspError> {
+        let mut remaining = data;
+        while !remaining.is_empty() {
+            let mut written = 0usize;
+            unsafe {
+                esp!(i2s_channel_write(
+                    self.inner,
+                    remaining.as_ptr() as *const c_void,
+                    remaining.len(),
+                    &mut written,
+                    u32::MAX,
+                ))?;
+            }
+            remaining = &remaining[written..];
         }
+        Ok(())
     }
 
+    /// Disables the channel, stopping the I2S clocks and DMA transfer.
     pub fn disable(&mut self) {
         unsafe {
-            let _ = i2s_channel_disable(self.0);
+            let _ = i2s_channel_disable(self.inner);
         }
     }
 
+    /// Enables the channel, starting the I2S clocks and allowing transmission.
     pub fn enable(&mut self) -> Result<(), EspError> {
-        unsafe { esp!(i2s_channel_enable(self.0)) }
+        unsafe { esp!(i2s_channel_enable(self.inner)) }
     }
 }
 
-impl Drop for I2s {
+impl Drop for AudioChannel {
     fn drop(&mut self) {
         unsafe {
-            let _ = i2s_channel_disable(self.0);
-            let _ = i2s_del_channel(self.0);
+            let _ = i2s_channel_disable(self.inner);
+            let _ = i2s_del_channel(self.inner);
         }
     }
 }
