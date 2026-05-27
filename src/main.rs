@@ -32,7 +32,7 @@ use esp_idf_sys::{
     // PLL_F160M (the hal default) is only valid on rev ≥ 3.0 and asserts otherwise.
     soc_periph_i2s_clk_src_t_I2S_CLK_SRC_DEFAULT as CLK_DEFAULT,
 };
-use sstv::{Encoder, Mode, RgbPixel};
+use sstv::{Encoder, Mode, RgbPixel, Synthesizer};
 
 // Decoded at compile time by build.rs: 320 × 240 pixels, 3 bytes each.
 static PATCH_RGB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/patch_rgb.bin"));
@@ -166,35 +166,18 @@ fn transmit(i2s: &mut I2sTx) {
     let mut buf = [0u8; CHUNK_SAMPLES * 4];
     let mut buf_pos = 0usize;
 
-    let mut phase = 0.0f32;
-    let mut sample_adjust = 0.0f32;
+    for sample in Synthesizer::new(encoder, SAMPLE_RATE) {
+        let [lo, hi] = sample.to_le_bytes();
 
-    for tone in encoder {
-        let freq = tone.frequency.hz() as f32;
-        let duration_sec = tone.duration.ns() as f32 / 1_000_000_000.0;
+        buf[buf_pos] = 0; // left lo  (silent)
+        buf[buf_pos + 1] = 0; // left hi  (silent)
+        buf[buf_pos + 2] = lo; // right lo (audio)
+        buf[buf_pos + 3] = hi; // right hi (audio)
+        buf_pos += 4;
 
-        let exact_samples = duration_sec * SAMPLE_RATE as f32 + sample_adjust;
-        let num_samples = exact_samples.round() as usize;
-        sample_adjust = exact_samples - num_samples as f32;
-
-        let phase_step = 2.0 * PI * freq / SAMPLE_RATE as f32;
-
-        for _ in 0..num_samples {
-            let sample = (phase.sin() * i16::MAX as f32) as i16;
-            let [lo, hi] = sample.to_le_bytes();
-
-            buf[buf_pos] = 0; // left lo  (silent)
-            buf[buf_pos + 1] = 0; // left hi  (silent)
-            buf[buf_pos + 2] = lo; // right lo (audio)
-            buf[buf_pos + 3] = hi; // right hi (audio)
-            buf_pos += 4;
-
-            phase = (phase + phase_step) % (2.0 * PI);
-
-            if buf_pos == buf.len() {
-                i2s.write_all(&buf).unwrap();
-                buf_pos = 0;
-            }
+        if buf_pos == buf.len() {
+            i2s.write_all(&buf).unwrap();
+            buf_pos = 0;
         }
     }
 
