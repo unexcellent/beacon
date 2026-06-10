@@ -40,9 +40,10 @@ static FRAME_READY: AtomicBool = AtomicBool::new(false);
 static mut CAPTURE_BUF: *mut core::ffi::c_void = core::ptr::null_mut();
 static mut OUTPUT_BUF: *mut u8 = core::ptr::null_mut();
 
-// Gray-world AWB gains (green = reference, IIR-smoothed across frames)
-static mut WB_R: f32 = 1.0;
-static mut WB_B: f32 = 1.0;
+// Gray-world AWB gains (green = reference, IIR-smoothed across frames).
+// Seeded with typical sensor values so the first frame is already close to neutral.
+static mut WB_R: f32 = 2.0;
+static mut WB_B: f32 = 3.0;
 
 // sRGB gamma LUT: linear 0..255 → gamma-encoded 0..255 (exponent 1/2.2)
 static mut GAMMA_LUT: [u8; 256] = [0u8; 256];
@@ -97,7 +98,7 @@ unsafe fn raw10_get8(row: *const u8, x: usize) -> u32 {
 
 // Box-filter downscale from 3840×2160 packed RAW10 → dw×dh RGB888 with software ISP.
 //
-// Bayer pattern: RGGB — (even row, even col) = R; (odd row, odd col) = B; rest = G.
+// Bayer pattern: BGGR — (even row, even col) = B; (odd row, odd col) = R; rest = G.
 //
 // Pipeline per output pixel:
 //   box-filter demosaic → black-level subtract → range-restore → gray-world WB
@@ -141,11 +142,11 @@ unsafe fn capture_to_rgb888(src: *const u8, dst: *mut u8, dw: usize, dh: usize) 
                     let v = raw10_get8(row, sx);
                     let xodd = sx & 1;
                     if yodd == 0 && xodd == 0 {
-                        sr += v;
-                        cr += 1;
-                    } else if yodd == 1 && xodd == 1 {
                         sb += v;
                         cb += 1;
+                    } else if yodd == 1 && xodd == 1 {
+                        sr += v;
+                        cr += 1;
                     } else {
                         sg += v;
                         cg += 1;
@@ -304,10 +305,22 @@ unsafe fn camera_capture_loop() -> ! {
     let mut i2c_dev: i2c_master_dev_handle_t = core::ptr::null_mut();
     esp!(i2c_master_bus_add_device(i2c_bus, &i2c_dev_cfg, &mut i2c_dev)).unwrap();
 
-    // 3. Release reset; 150 ms for I2C to stabilize, then bus recovery
+    // 3. Release reset; give the sensor 300 ms to bring its I2C interface up,
+    //    then retry bus recovery until the stuck SDA/SCL lines are clear.
     gpio_set_level(XSHUTDN_GPIO, 1);
-    std::thread::sleep(Duration::from_millis(150));
-    let _ = i2c_master_bus_reset(i2c_bus);
+    std::thread::sleep(Duration::from_millis(300));
+    let mut bus_ok = false;
+    for attempt in 0..5u8 {
+        if i2c_master_bus_reset(i2c_bus) == ESP_OK as i32 {
+            bus_ok = true;
+            break;
+        }
+        log::warn!("I2C bus reset attempt {} failed, retrying", attempt + 1);
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    if !bus_ok {
+        log::warn!("I2C bus recovery failed after 5 attempts — continuing with default sensor state");
+    }
 
     // 4. Program SC850SL registers (4K15 2-lane RAW10)
     let mut i2c_failures: u32 = 0;
@@ -409,6 +422,12 @@ unsafe fn camera_capture_loop() -> ! {
     );
 
     // 12. Capture loop: wait for frame → ISP → send
+    // Skip the first AWB_WARMUP_FRAMES frames so the IIR AWB can settle before
+    // any frame is transmitted; the seeded WB_R/WB_B values mean only a handful
+    // of frames are needed to reach a stable colour balance.
+    const AWB_WARMUP_FRAMES: u32 = 5;
+    let mut frame_count: u32 = 0;
+
     loop {
         while !FRAME_READY.swap(false, Ordering::AcqRel) {
             std::thread::sleep(Duration::from_millis(1));
@@ -418,6 +437,18 @@ unsafe fn camera_capture_loop() -> ! {
 
         capture_to_rgb888(CAPTURE_BUF as *const u8, OUTPUT_BUF, OUT_W, OUT_H);
         let t_isp = t0.elapsed();
+
+        frame_count += 1;
+        if frame_count <= AWB_WARMUP_FRAMES {
+            log::info!(
+                "awb warmup {}/{}: wb_r={:.2} wb_b={:.2}",
+                frame_count,
+                AWB_WARMUP_FRAMES,
+                *core::ptr::addr_of!(WB_R),
+                *core::ptr::addr_of!(WB_B),
+            );
+            continue;
+        }
 
         let rgb = core::slice::from_raw_parts(OUTPUT_BUF, OUT_BYTES);
         send_frame(rgb, OUT_W, OUT_H);
