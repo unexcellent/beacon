@@ -1,62 +1,82 @@
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+
 use esp_idf_sys::{
-    EspError, esp,
-    uart_config_t,
-    uart_driver_install,
-    uart_hw_flowcontrol_t_UART_HW_FLOWCTRL_DISABLE as HW_FLOWCTRL_DISABLE,
-    uart_mode_t_UART_MODE_RS485_HALF_DUPLEX as RS485_HALF_DUPLEX,
-    uart_param_config,
-    uart_parity_t_UART_PARITY_DISABLE as PARITY_DISABLE,
-    uart_port_t_UART_NUM_1 as UART1,
-    uart_read_bytes,
-    uart_set_mode,
-    uart_set_pin,
-    uart_stop_bits_t_UART_STOP_BITS_1 as STOP_BITS_1,
-    uart_word_length_t_UART_DATA_8_BITS as DATA_8_BITS,
+    esp,
+    gpio_config,
+    gpio_config_t,
+    gpio_get_level,
+    gpio_install_isr_service,
+    gpio_int_type_t_GPIO_INTR_ANYEDGE as GPIO_INTR_ANYEDGE,
+    gpio_isr_handler_add,
+    gpio_mode_t_GPIO_MODE_INPUT as GPIO_INPUT,
+    gpio_mode_t_GPIO_MODE_OUTPUT as GPIO_OUTPUT,
+    gpio_set_level,
+    vTaskDelay,
 };
 
-const BAUD_RATE: i32 = 9600;
-const TX_PIN: i32 = 30;
-const DE_PIN: i32 = 31; // RTS — controls THVD1424 DE line in RS485 half-duplex mode
-const RX_PIN: i32 = 32;
+const MONITOR_PINS: [i32; 2] = [37, 39];
+const DE_PIN: i32 = 38;
+
+static EDGES: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+static LEVEL: [AtomicU8; 2] = [AtomicU8::new(0), AtomicU8::new(0)];
+
+unsafe extern "C" fn on_edge(arg: *mut core::ffi::c_void) {
+    let idx = arg as usize;
+    let level = gpio_get_level(MONITOR_PINS[idx]) as u8;
+    LEVEL[idx].store(level, Ordering::Relaxed);
+    EDGES[idx].fetch_add(1, Ordering::Relaxed);
+}
 
 fn main() {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    log::info!("RS485 receive test — UART1 / {} baud", BAUD_RATE);
-
     unsafe {
-        let config = uart_config_t {
-            baud_rate: BAUD_RATE,
-            data_bits: DATA_8_BITS,
-            parity: PARITY_DISABLE,
-            stop_bits: STOP_BITS_1,
-            flow_ctrl: HW_FLOWCTRL_DISABLE,
-            rx_flow_ctrl_thresh: 0,
+        // Configure GPIO 38 as output and drive it HIGH
+        let out_cfg = gpio_config_t {
+            pin_bit_mask: 1u64 << DE_PIN,
+            mode: GPIO_OUTPUT,
+            pull_up_en: 0,
+            pull_down_en: 0,
+            intr_type: 0,
             ..Default::default()
         };
+        esp!(gpio_config(&out_cfg)).unwrap();
+        esp!(gpio_set_level(DE_PIN, 0)).unwrap();
 
-        esp!(uart_driver_install(UART1, 1024, 0, 0, std::ptr::null_mut(), 0)).unwrap();
-        esp!(uart_param_config(UART1, &config)).unwrap();
-        esp!(uart_set_pin(UART1, TX_PIN, RX_PIN, DE_PIN, -1)).unwrap();
-        esp!(uart_set_mode(UART1, RS485_HALF_DUPLEX)).unwrap();
+        // Configure GPIO 37 and 39 as inputs with edge interrupts
+        let in_mask: u64 = MONITOR_PINS.iter().fold(0u64, |acc, &p| acc | (1u64 << p));
+        let in_cfg = gpio_config_t {
+            pin_bit_mask: in_mask,
+            mode: GPIO_INPUT,
+            pull_up_en: 0,
+            pull_down_en: 0,
+            intr_type: GPIO_INTR_ANYEDGE,
+            ..Default::default()
+        };
+        esp!(gpio_config(&in_cfg)).unwrap();
+        esp!(gpio_install_isr_service(0)).unwrap();
+        for (idx, &pin) in MONITOR_PINS.iter().enumerate() {
+            esp!(gpio_isr_handler_add(pin, Some(on_edge), idx as *mut core::ffi::c_void)).unwrap();
+        }
     }
 
-    log::info!("Listening for RS485 data…");
+    log::info!("GPIO {} (DE) held LOW; watching for voltage changes on GPIOs {:?}", DE_PIN, MONITOR_PINS);
 
-    let mut buf = [0u8; 64];
+    let mut last_edges = [0u32; 2];
     loop {
-        let len = unsafe {
-            uart_read_bytes(
-                UART1,
-                buf.as_mut_ptr().cast(),
-                buf.len() as u32,
-                100, // ticks (~100 ms at default tick rate)
-            )
-        };
-
-        if len > 0 {
-            log::info!("Received {} byte(s): {:02x?}", len, &buf[..len as usize]);
+        unsafe { vTaskDelay(500) };
+        for (idx, &pin) in MONITOR_PINS.iter().enumerate() {
+            let edges = EDGES[idx].load(Ordering::Relaxed);
+            if edges != last_edges[idx] {
+                let level = LEVEL[idx].load(Ordering::Relaxed);
+                let direction = if level == 1 { "HIGH (rising)" } else { "LOW (falling)" };
+                log::info!(
+                    "Voltage change on GPIO {}: {} — total edges: {}",
+                    pin, direction, edges
+                );
+                last_edges[idx] = edges;
+            }
         }
     }
 }
