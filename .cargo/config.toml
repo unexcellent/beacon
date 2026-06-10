@@ -17,3 +17,5 @@ ESP_IDF_VERSION = "v5.5.3"
 ESP_IDF_TOOLS_INSTALL_DIR = "workspace"
 IDF_PATH = { value = ".embuild/espressif/esp-idf/v5.5.3", relative = true, force = true }
 IDF_PYTHON_ENV_PATH = { value = ".embuild/espressif/python_env/idf5.5_py3.13_env", relative = true, force = true }
+ESP_IDF_GLOB_0_BASE = { value = "cmake_override", relative = true }
+ESP_IDF_GLOB_0_GLOB = "main/CMakeLists.txt"

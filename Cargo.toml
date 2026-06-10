@@ -35,3 +35,9 @@ sstv = { git = "https://github.com/unexcellent/sstv.git", branch = "main" }
 [build-dependencies]
 embuild = "0.33"
 image = "0.25.1"
+
+[package.metadata.esp-idf-sys]
+extra_components = [
+    { bindings_header = "src/bindings_camera.h" },
+    { component_dirs = ["cmake_override/isp_patch"] }
+]
