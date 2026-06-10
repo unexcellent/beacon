@@ -3,26 +3,49 @@
 mod audio;
 
 use esp_idf_sys::*;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 unsafe extern "C" {
     fn isp_bypass_raw10_patch(h_res: u32, v_res: u32);
+    // ESP_LINE_ENDINGS_LF = 2: pass LF bytes through unchanged (no CRLF expansion).
+    // Critical for binary frame data — every 0x0A pixel byte would otherwise become
+    // 0x0D 0x0A, inserting bytes and corrupting the stream on the host side.
+    fn usb_serial_jtag_vfs_set_tx_line_endings(mode: i32);
 }
 
-// SC850SL MIPI-CSI camera GPIO assignments (from MOVE-IIIa-Imager sdkconfig.defaults)
-const I2C_SDA_GPIO: gpio_num_t = 11; // LP_GPIO11
-const I2C_SCL_GPIO: gpio_num_t = 9; // LP_GPIO9
-const XSHUTDN_GPIO: gpio_num_t = 54; // active-low reset
+const I2C_SDA_GPIO: gpio_num_t = 11;
+const I2C_SCL_GPIO: gpio_num_t = 9;
+const XSHUTDN_GPIO: gpio_num_t = 54;
 
 const CAPTURE_W: usize = 3840;
 const CAPTURE_H: usize = 2160;
-// RAW10 unpacked: each 10-bit pixel stored in 2 bytes (lower 10 bits valid)
-const CAPTURE_FB_BYTES: usize = CAPTURE_W * CAPTURE_H * 2;
+// RAW10 packed: 4 pixels in 5 bytes (each pixel's 8 MSBs in bytes 0-3, 2 LSBs packed in byte 4)
+const CAPTURE_ROW_BYTES: usize = CAPTURE_W * 10 / 8; // 4800 bytes/row
+const CAPTURE_FB_BYTES: usize = CAPTURE_ROW_BYTES * CAPTURE_H; // 10,368,000 bytes total
+
+const OUT_W: usize = 320;
+const OUT_H: usize = 240;
+const OUT_BYTES: usize = OUT_W * OUT_H * 3; // RGB888
+
+// Magic header recognised by local/receive_frame.py
+const FRAME_MAGIC: [u8; 4] = [0xFF, 0xFE, 0xFD, 0xFC];
+
+// Black-level pedestal in 8-bit space. The 10-bit RAW10 sample is shifted right
+// by 2 to get 8 bits; SC850SL typical pedestal is ~64 in 10-bit → ~16 here.
+const BLACK_LEVEL: f32 = 16.0;
 
 static FRAME_READY: AtomicBool = AtomicBool::new(false);
-// Shared between main task and ISR callbacks — only written once at startup
 static mut CAPTURE_BUF: *mut core::ffi::c_void = core::ptr::null_mut();
+static mut OUTPUT_BUF: *mut u8 = core::ptr::null_mut();
+
+// Gray-world AWB gains (green = reference, IIR-smoothed across frames)
+static mut WB_R: f32 = 1.0;
+static mut WB_B: f32 = 1.0;
+
+// sRGB gamma LUT: linear 0..255 → gamma-encoded 0..255 (exponent 1/2.2)
+static mut GAMMA_LUT: [u8; 256] = [0u8; 256];
 
 unsafe extern "C" fn on_get_new_trans(
     _: esp_cam_ctlr_handle_t,
@@ -43,9 +66,6 @@ unsafe extern "C" fn on_trans_finished(
     false
 }
 
-// 16-bit register address + 8-bit value write for SC850SL; returns true on success.
-// Retries up to 3 times with 5 ms delay — the camera's I2C slave can be briefly
-// unresponsive during the first few ms after XSHUTDN release + bus_reset.
 unsafe fn sc850sl_write(dev: i2c_master_dev_handle_t, reg: u16, val: u8) -> bool {
     let buf = [(reg >> 8) as u8, reg as u8, val];
     for attempt in 0..3u8 {
@@ -57,6 +77,137 @@ unsafe fn sc850sl_write(dev: i2c_master_dev_handle_t, reg: u16, val: u8) -> bool
         }
     }
     false
+}
+
+unsafe fn init_gamma() {
+    for i in 0..256usize {
+        let c = (i as f32 / 255.0).powf(1.0 / 2.2);
+        let v = (c * 255.0 + 0.5) as u32;
+        GAMMA_LUT[i] = if v > 255 { 255 } else { v as u8 };
+    }
+}
+
+// Read the 8 MSBs of the x-th pixel from a packed RAW10 row.
+// Layout: 4 pixels per 5-byte group — bytes 0-3 hold each pixel's top 8 bits,
+// byte 4 holds the 2 LSBs of all four (discarded here, not needed for an 8-bit path).
+#[inline(always)]
+unsafe fn raw10_get8(row: *const u8, x: usize) -> u32 {
+    *row.add((x >> 2) * 5 + (x & 3)) as u32
+}
+
+// Box-filter downscale from 3840×2160 packed RAW10 → dw×dh RGB888 with software ISP.
+//
+// Bayer pattern: RGGB — (even row, even col) = R; (odd row, odd col) = B; rest = G.
+//
+// Pipeline per output pixel:
+//   box-filter demosaic → black-level subtract → range-restore → gray-world WB
+//   → sRGB gamma → pack RGB888
+//
+// Gray-world AWB is updated once per frame from BL-corrected linear means; gains
+// are IIR-smoothed (α = 0.3) so they don't pulse between frames.
+unsafe fn capture_to_rgb888(src: *const u8, dst: *mut u8, dw: usize, dh: usize) {
+    let sw = CAPTURE_W;
+    let sh = CAPTURE_H;
+    let out = core::slice::from_raw_parts_mut(dst, dw * dh * 3);
+
+    let mut fr: u64 = 0;
+    let mut fg: u64 = 0;
+    let mut fb: u64 = 0;
+    let wb_r = *core::ptr::addr_of!(WB_R);
+    let wb_b = *core::ptr::addr_of!(WB_B);
+
+    let bl = BLACK_LEVEL;
+    let bl_scale = 255.0f32 / (255.0f32 - bl).max(1.0);
+
+    for dy in 0..dh {
+        let sy0 = (dy * sh) / dh;
+        let sy1 = (((dy + 1) * sh) / dh).max(sy0 + 2).min(sh);
+
+        for dx in 0..dw {
+            let sx0 = (dx * sw) / dw;
+            let sx1 = (((dx + 1) * sw) / dw).max(sx0 + 2).min(sw);
+
+            let mut sr: u32 = 0;
+            let mut cr: u32 = 0;
+            let mut sg: u32 = 0;
+            let mut cg: u32 = 0;
+            let mut sb: u32 = 0;
+            let mut cb: u32 = 0;
+
+            for sy in sy0..sy1 {
+                let row = src.add(sy * CAPTURE_ROW_BYTES);
+                let yodd = sy & 1;
+                for sx in sx0..sx1 {
+                    let v = raw10_get8(row, sx);
+                    let xodd = sx & 1;
+                    if yodd == 0 && xodd == 0 {
+                        sr += v;
+                        cr += 1;
+                    } else if yodd == 1 && xodd == 1 {
+                        sb += v;
+                        cb += 1;
+                    } else {
+                        sg += v;
+                        cg += 1;
+                    }
+                }
+            }
+
+            let ar = if cr > 0 { (sr / cr) as f32 } else { 0.0 };
+            let ag = if cg > 0 { (sg / cg) as f32 } else { 0.0 };
+            let ab = if cb > 0 { (sb / cb) as f32 } else { 0.0 };
+
+            // Black-level subtract + range restore (linear space)
+            let lr = ((ar - bl) * bl_scale).max(0.0);
+            let lg = ((ag - bl) * bl_scale).max(0.0);
+            let lb = ((ab - bl) * bl_scale).max(0.0);
+
+            fr += lr as u64;
+            fg += lg as u64;
+            fb += lb as u64;
+
+            // White-balance gain: green is the reference channel (gain 1.0)
+            let lr = lr * wb_r;
+            let lb = lb * wb_b;
+
+            let ir = (lr + 0.5) as i32;
+            let ig = (lg + 0.5) as i32;
+            let ib = (lb + 0.5) as i32;
+
+            let ir = ir.clamp(0, 255) as usize;
+            let ig = ig.clamp(0, 255) as usize;
+            let ib = ib.clamp(0, 255) as usize;
+
+            let idx = (dy * dw + dx) * 3;
+            out[idx] = GAMMA_LUT[ir];
+            out[idx + 1] = GAMMA_LUT[ig];
+            out[idx + 2] = GAMMA_LUT[ib];
+        }
+    }
+
+    // Gray-world AWB update for next frame
+    if fr > 0 && fg > 0 && fb > 0 {
+        let gr = (fg as f32 / fr as f32).clamp(0.5, 4.0);
+        let gb = (fg as f32 / fb as f32).clamp(0.5, 4.0);
+        WB_R = WB_R * 0.7 + gr * 0.3;
+        WB_B = WB_B * 0.7 + gb * 0.3;
+    }
+}
+
+// Emit a frame over USB-JTAG serial in the format expected by receive_frame.py:
+//   [0xFF 0xFE 0xFD 0xFC] [w u16-LE] [h u16-LE] [byte_len u32-LE] [RGB888 pixels]
+unsafe fn send_frame(data: &[u8], w: usize, h: usize) {
+    let byte_len = (w * h * 3) as u32;
+    let mut header = [0u8; 12];
+    header[0..4].copy_from_slice(&FRAME_MAGIC);
+    header[4..6].copy_from_slice(&(w as u16).to_le_bytes());
+    header[6..8].copy_from_slice(&(h as u16).to_le_bytes());
+    header[8..12].copy_from_slice(&byte_len.to_le_bytes());
+
+    let mut out = std::io::stdout();
+    let _ = out.write_all(&header);
+    let _ = out.write_all(data);
+    let _ = out.flush();
 }
 
 // Init table for SC850SL mode: 4K / 15 fps / 2-lane / RAW10 (table_2, 191 entries)
@@ -116,11 +267,11 @@ const INIT_TABLE: &[(u16, u8)] = &[
 fn main() {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
-    log::info!("MIPI-CSI brightness monitor starting");
-    unsafe { camera_brightness_loop() }
+    log::info!("MIPI-CSI frame capture starting");
+    unsafe { camera_capture_loop() }
 }
 
-unsafe fn camera_brightness_loop() -> ! {
+unsafe fn camera_capture_loop() -> ! {
     // 1. Hold SC850SL in reset (XSHUTDN active-low)
     let gpio_cfg = gpio_config_t {
         pin_bit_mask: 1u64 << XSHUTDN_GPIO,
@@ -132,15 +283,9 @@ unsafe fn camera_brightness_loop() -> ! {
     };
     esp!(gpio_config(&gpio_cfg)).unwrap();
     gpio_set_level(XSHUTDN_GPIO, 0);
-    // Hold reset for 200 ms — camera was running since boot (GPIO 54 floated HIGH).
-    // Empirically, 20 ms is not always enough for SDA to be released on warm resets.
-    std::thread::sleep(Duration::from_millis(200));
+    std::thread::sleep(Duration::from_millis(500)); // 500ms: ensures SDA is released after warm resets
 
     // 2. LP I2C bus (LP_I2C_NUM_0=2, LP_GPIO9 SCL / LP_GPIO11 SDA, 100 kHz)
-    //    GPIO 9/11 are in the LP domain (1.8 V). Using HP I2C (port 0) routes
-    //    through the HP GPIO matrix whose input threshold is ~2 V (3.3 V domain),
-    //    so 1.8 V pull-ups register as LOW → bus_busy always 1. LP I2C uses
-    //    rtc_gpio_init which routes through the LP IO mux at 1.8 V.
     let mut i2c_bus_cfg: i2c_master_bus_config_t = core::mem::zeroed();
     i2c_bus_cfg.i2c_port = i2c_port_t_LP_I2C_NUM_0 as i32;
     i2c_bus_cfg.sda_io_num = I2C_SDA_GPIO;
@@ -159,17 +304,12 @@ unsafe fn camera_brightness_loop() -> ! {
     let mut i2c_dev: i2c_master_dev_handle_t = core::ptr::null_mut();
     esp!(i2c_master_bus_add_device(i2c_bus, &i2c_dev_cfg, &mut i2c_dev)).unwrap();
 
-    // 3. Release reset; 150 ms for I2C to stabilize, then run bus recovery.
-    //    bus_reset must be called AFTER XSHUTDN release so the camera's I2C
-    //    slave is actually running — calling it while in reset does nothing useful
-    //    (nothing is driving SDA, the CLR_BUS pulse sequence completes but any
-    //    stuck condition from the sensor's startup hasn't happened yet).
+    // 3. Release reset; 150 ms for I2C to stabilize, then bus recovery
     gpio_set_level(XSHUTDN_GPIO, 1);
     std::thread::sleep(Duration::from_millis(150));
     let _ = i2c_master_bus_reset(i2c_bus);
 
     // 4. Program SC850SL registers (4K15 2-lane RAW10)
-    //    Writes to 0x36e9 / 0x36f9 (PLL dividers) need a 20 ms lock delay
     let mut i2c_failures: u32 = 0;
     for &(reg, val) in INIT_TABLE {
         if !sc850sl_write(i2c_dev, reg, val) {
@@ -180,7 +320,11 @@ unsafe fn camera_brightness_loop() -> ! {
         }
     }
     if i2c_failures > 0 {
-        log::warn!("SC850SL init: {}/{} register writes failed — camera may not stream", i2c_failures, INIT_TABLE.len());
+        log::warn!(
+            "SC850SL init: {}/{} register writes failed",
+            i2c_failures,
+            INIT_TABLE.len()
+        );
     }
 
     // 5. Power MIPI CSI-2 PHY at 2.5 V (LDO channel 3)
@@ -190,15 +334,19 @@ unsafe fn camera_brightness_loop() -> ! {
     let mut ldo_chan: esp_ldo_channel_handle_t = core::ptr::null_mut();
     esp!(esp_ldo_acquire_channel(&ldo_cfg, &mut ldo_chan)).unwrap();
 
-    // 6. Allocate 16 MB DMA frame buffer in PSRAM (64-byte aligned for L2 cache)
-    let buf = heap_caps_aligned_calloc(
+    // 6. Allocate frame buffers in PSRAM (64-byte aligned for L2 cache)
+    let cap_buf = heap_caps_aligned_calloc(
         64,
         1,
         CAPTURE_FB_BYTES,
         MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA,
     );
-    assert!(!buf.is_null(), "frame buffer allocation failed");
-    CAPTURE_BUF = buf;
+    assert!(!cap_buf.is_null(), "capture buffer allocation failed");
+    CAPTURE_BUF = cap_buf;
+
+    let out_buf = heap_caps_malloc(OUT_BYTES, MALLOC_CAP_SPIRAM);
+    assert!(!out_buf.is_null(), "output buffer allocation failed");
+    OUTPUT_BUF = out_buf as *mut u8;
 
     // 7. CSI controller: 3840×2160, 2-lane, 1080 Mbps/lane, RAW10 pass-through
     let mut csi_cfg: esp_cam_ctlr_csi_config_t = core::mem::zeroed();
@@ -222,56 +370,64 @@ unsafe fn camera_brightness_loop() -> ! {
     esp!(esp_cam_ctlr_enable(csi)).unwrap();
     esp!(esp_cam_ctlr_start(csi)).unwrap();
 
-    // 8. ISP processor: create with placeholder colors then patch hardware registers
-    //    directly for RAW10 bypass (matches reference project camera_isp_bypass_start).
-    //    The driver API doesn't correctly configure frame_cfg for RAW10 passthrough —
-    //    isp_bypass_raw10_patch() writes hadr_num/vadr_num/isp_en directly so the
-    //    ISP hardware knows the frame dimensions and asserts frame-done to the DMA.
+    // 8. ISP processor: create with placeholder colors then patch for RAW10 bypass
     let mut isp_cfg: esp_isp_processor_cfg_t = core::mem::zeroed();
     isp_cfg.clk_hz = 80_000_000;
     isp_cfg.input_data_source = isp_input_data_source_t_ISP_INPUT_DATA_SOURCE_CSI;
-    isp_cfg.input_data_color_type = isp_color_t_ISP_COLOR_RAW8;   // placeholder
-    isp_cfg.output_data_color_type = isp_color_t_ISP_COLOR_RGB565; // placeholder
+    isp_cfg.input_data_color_type = isp_color_t_ISP_COLOR_RAW8;
+    isp_cfg.output_data_color_type = isp_color_t_ISP_COLOR_RGB565;
     isp_cfg.h_res = CAPTURE_W as u32;
     isp_cfg.v_res = CAPTURE_H as u32;
     isp_cfg.bayer_order = color_raw_element_order_t_COLOR_RAW_ELEMENT_ORDER_BGGR;
     let mut isp: isp_proc_handle_t = core::ptr::null_mut();
     esp!(esp_isp_new_processor(&isp_cfg, &mut isp)).unwrap();
     isp_bypass_raw10_patch(CAPTURE_W as u32, CAPTURE_H as u32);
+
     // 9. Seed first DMA receive transaction
     let mut trans: esp_cam_ctlr_trans_t = core::mem::zeroed();
     trans.buffer = CAPTURE_BUF;
     trans.buflen = CAPTURE_FB_BYTES;
     esp!(esp_cam_ctlr_receive(csi, &mut trans, 100)).unwrap();
 
-    // 10. Enable sensor streaming; wait 200 ms for MIPI lanes to stabilize (~3 frames)
-    sc850sl_write(i2c_dev, 0x302c, 0x00); // exit deep-sleep auxiliary
-    sc850sl_write(i2c_dev, 0x0100, 0x01); // stream on
+    // 10. Enable sensor streaming; wait 200 ms for MIPI lanes to stabilize
+    sc850sl_write(i2c_dev, 0x302c, 0x00);
+    sc850sl_write(i2c_dev, 0x0100, 0x01);
     std::thread::sleep(Duration::from_millis(200));
 
-    log::info!("SC850SL streaming — printing average RAW10 brightness every second");
+    // 11. One-time setup: gamma LUT + binary-clean stdout
+    init_gamma();
+    // ESP_LINE_ENDINGS_LF = 2: disable the VFS LF→CRLF expansion so pixel bytes
+    // (including any 0x0A values) pass through to the host without insertion.
+    usb_serial_jtag_vfs_set_tx_line_endings(2);
 
-    // 11. Brightness loop: one measurement per second
+    log::info!(
+        "SC850SL streaming — capturing {}×{} → {}×{} RGB888",
+        CAPTURE_W,
+        CAPTURE_H,
+        OUT_W,
+        OUT_H
+    );
+
+    // 12. Capture loop: wait for frame → ISP → send
     loop {
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-
-        // Wait for the ISR to signal a completed DMA frame
         while !FRAME_READY.swap(false, Ordering::AcqRel) {
             std::thread::sleep(Duration::from_millis(1));
         }
 
-        // Average all RAW10 pixels (u16 words, value in bits [9:0])
-        let pixels = core::slice::from_raw_parts(CAPTURE_BUF as *const u16, CAPTURE_W * CAPTURE_H);
-        let sum: u64 = pixels.iter().map(|&p| (p & 0x3ff) as u64).sum();
-        let avg = sum / (CAPTURE_W * CAPTURE_H) as u64;
+        let t0 = std::time::Instant::now();
 
-        log::info!("Average brightness: {}/1023", avg);
+        capture_to_rgb888(CAPTURE_BUF as *const u8, OUTPUT_BUF, OUT_W, OUT_H);
+        let t_isp = t0.elapsed();
 
-        // on_get_new_trans re-arms DMA automatically each frame; no explicit receive needed.
+        let rgb = core::slice::from_raw_parts(OUTPUT_BUF, OUT_BYTES);
+        send_frame(rgb, OUT_W, OUT_H);
 
-        let now = std::time::Instant::now();
-        if deadline > now {
-            std::thread::sleep(deadline - now);
-        }
+        log::info!(
+            "frame sent: isp={}ms total={}ms wb_r={:.2} wb_b={:.2}",
+            t_isp.as_millis(),
+            t0.elapsed().as_millis(),
+            *core::ptr::addr_of!(WB_R),
+            *core::ptr::addr_of!(WB_B),
+        );
     }
 }
