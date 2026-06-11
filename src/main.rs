@@ -81,5 +81,9 @@ unsafe fn camera_capture_loop() -> ! {
             wb_r,
             wb_b,
         );
+
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
     }
 }
