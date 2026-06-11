@@ -38,6 +38,6 @@ embuild = "0.33"
 
 [package.metadata.esp-idf-sys]
 extra_components = [
-    { bindings_header = "src/bindings_camera.h" },
+    { bindings_header = "src/camera/bindings.h" },
     { component_dirs = ["cmake_override/isp_patch"] }
 ]
