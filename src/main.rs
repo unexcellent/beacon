@@ -43,14 +43,13 @@ unsafe fn camera_capture_loop() -> ! {
     // (including any 0x0A values) pass through to the host without insertion.
     usb_serial_jtag_vfs_set_tx_line_endings(2);
 
-    let mut camera =
-        camera::CameraChannel::new(camera::SC850SL, camera::BEACON_INTERFACE).unwrap();
+    let mut camera = camera::CameraChannel::new(camera::SC850SL, camera::BEACON_INTERFACE).unwrap();
     let (out_w, out_h) = camera.output_size();
 
     // Skip the first AWB_WARMUP_FRAMES so the IIR AWB can settle before
     // any frame is transmitted; the seeded WB_R/WB_B values mean only a handful
     // of frames are needed to reach a stable colour balance.
-    const AWB_WARMUP_FRAMES: u32 = 10;
+    const AWB_WARMUP_FRAMES: u32 = 0; // left at 0 for testing purposes. should be restored when compiling for prod
     let mut frame_count: u32 = 0;
 
     loop {

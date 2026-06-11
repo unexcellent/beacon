@@ -19,6 +19,7 @@ panic = "immediate-abort"
 
 [profile.dev]
 debug = true
+strip = "debuginfo"
 opt-level = "z"
 
 [patch.crates-io]
