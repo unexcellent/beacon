@@ -66,14 +66,14 @@ unsafe fn sensor_write(dev: i2c_master_dev_handle_t, reg: u16, val: u8) -> bool 
     false
 }
 
-// Box-filter downscale from capture resolution (packed RAW10, BGGR Bayer) → dw×dh RGB888.
+// Box-filter downscale from capture resolution (packed RAW10) → dw×dh RGB888.
 //
 // Pipeline per output pixel:
 //   box-filter demosaic → black-level subtract → range-restore → gray-world WB
 //   → sRGB gamma → pack RGB888
 //
 // Gray-world AWB is updated once per frame from BL-corrected linear means; gains
-// are IIR-smoothed (α = 0.3) so they don't pulse between frames.
+// are IIR-smoothed (α = 0.5) so they converge within ~10 frames.
 unsafe fn process_frame(
     src: *const u8,
     dst: *mut u8,
@@ -83,7 +83,23 @@ unsafe fn process_frame(
     sh: usize,
     row_bytes: usize,
     black_level: f32,
+    bayer_order: BayerOrder,
 ) {
+    // Precompute which (row_parity, col_parity) pair maps to R vs B so the match
+    // is lifted out of the hot inner loop by the compiler.
+    let (red_yodd, red_xodd) = match bayer_order {
+        BayerOrder::Bggr => (1usize, 1usize),
+        BayerOrder::Rggb => (0, 0),
+        BayerOrder::Grbg => (0, 1),
+        BayerOrder::Gbrg => (1, 0),
+    };
+    let (blue_yodd, blue_xodd) = match bayer_order {
+        BayerOrder::Bggr => (0usize, 0usize),
+        BayerOrder::Rggb => (1, 1),
+        BayerOrder::Grbg => (1, 0),
+        BayerOrder::Gbrg => (0, 1),
+    };
+
     let out = core::slice::from_raw_parts_mut(dst, dw * dh * 3);
     let mut fr: u64 = 0;
     let mut fg: u64 = 0;
@@ -117,12 +133,12 @@ unsafe fn process_frame(
                 for sx in sx0..sx1 {
                     let v = raw10_get8(row, sx);
                     let xodd = sx & 1;
-                    if yodd == 0 && xodd == 0 {
-                        sb += v;
-                        cb += 1;
-                    } else if yodd == 1 && xodd == 1 {
+                    if yodd == red_yodd && xodd == red_xodd {
                         sr += v;
                         cr += 1;
+                    } else if yodd == blue_yodd && xodd == blue_xodd {
+                        sb += v;
+                        cb += 1;
                     } else {
                         sg += v;
                         cg += 1;
@@ -155,9 +171,26 @@ unsafe fn process_frame(
     if fr > 0 && fg > 0 && fb > 0 {
         let gr = (fg as f32 / fr as f32).clamp(0.5, 4.0);
         let gb = (fg as f32 / fb as f32).clamp(0.5, 4.0);
-        WB_R = WB_R * 0.7 + gr * 0.3;
-        WB_B = WB_B * 0.7 + gb * 0.3;
+        WB_R = WB_R * 0.5 + gr * 0.5;
+        WB_B = WB_B * 0.5 + gb * 0.5;
     }
+}
+
+/// Bayer colour filter array order of the sensor output.
+///
+/// Describes which colour sits at the even-row/even-column pixel. The pattern repeats
+/// every 2×2 pixels; the two diagonally opposite corners are always the same colour
+/// (for standard RGGB/BGGR) or always green (for GRBG/GBRG).
+#[derive(Clone, Copy)]
+pub enum BayerOrder {
+    /// Blue at (even row, even col), Red at (odd row, odd col).
+    Bggr,
+    /// Red at (even row, even col), Blue at (odd row, odd col).
+    Rggb,
+    /// Green at (even row, even col), Red at (even row, odd col).
+    Grbg,
+    /// Green at (even row, even col), Blue at (even row, odd col).
+    Gbrg,
 }
 
 /// Describes sensor-specific settings: resolution, MIPI config, I2C address, and init registers.
@@ -174,6 +207,8 @@ pub struct CameraSensor {
     pub data_lane_num: u8,
     /// Per-lane MIPI bit rate in Mbps.
     pub lane_bit_rate_mbps: i32,
+    /// Bayer CFA layout of the sensor RAW output.
+    pub bayer_order: BayerOrder,
     /// Black-level pedestal in 8-bit space (10-bit sensor value >> 2).
     pub black_level: f32,
     /// Initial white-balance red gain seed (green = 1.0 reference).
@@ -213,9 +248,10 @@ pub const SC850SL: CameraSensor = CameraSensor {
     capture_height: 2160,
     data_lane_num: 2,
     lane_bit_rate_mbps: 1080_i32,
+    bayer_order: BayerOrder::Rggb,
     black_level: 16.0,
-    wb_r_seed: 2.0,
-    wb_b_seed: 3.0,
+    wb_r_seed: 1.5,
+    wb_b_seed: 1.5,
     init_table: SC850SL_INIT_TABLE,
     post_write_delay_regs: &[0x36e9, 0x36f9],
 };
@@ -304,6 +340,7 @@ pub struct CameraChannel {
     cap_h: usize,
     cap_row_bytes: usize,
     black_level: f32,
+    bayer_order: BayerOrder,
 }
 
 impl CameraChannel {
@@ -433,7 +470,12 @@ impl CameraChannel {
         isp_cfg.output_data_color_type = isp_color_t_ISP_COLOR_RGB565;
         isp_cfg.h_res = sensor.capture_width as u32;
         isp_cfg.v_res = sensor.capture_height as u32;
-        isp_cfg.bayer_order = color_raw_element_order_t_COLOR_RAW_ELEMENT_ORDER_BGGR;
+        isp_cfg.bayer_order = match sensor.bayer_order {
+            BayerOrder::Bggr => color_raw_element_order_t_COLOR_RAW_ELEMENT_ORDER_BGGR,
+            BayerOrder::Rggb => color_raw_element_order_t_COLOR_RAW_ELEMENT_ORDER_RGGB,
+            BayerOrder::Grbg => color_raw_element_order_t_COLOR_RAW_ELEMENT_ORDER_GRBG,
+            BayerOrder::Gbrg => color_raw_element_order_t_COLOR_RAW_ELEMENT_ORDER_GBRG,
+        };
         let mut isp: isp_proc_handle_t = core::ptr::null_mut();
         esp!(esp_isp_new_processor(&isp_cfg, &mut isp))?;
         isp_bypass_raw10_patch(sensor.capture_width as u32, sensor.capture_height as u32);
@@ -475,6 +517,7 @@ impl CameraChannel {
             cap_h: sensor.capture_height,
             cap_row_bytes,
             black_level: sensor.black_level,
+            bayer_order: sensor.bayer_order,
         })
     }
 
@@ -493,6 +536,7 @@ impl CameraChannel {
             self.cap_h,
             self.cap_row_bytes,
             self.black_level,
+            self.bayer_order,
         );
         core::slice::from_raw_parts(self.output_buf, self.out_w * self.out_h * 3)
     }

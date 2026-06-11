@@ -50,7 +50,7 @@ unsafe fn camera_capture_loop() -> ! {
     // Skip the first AWB_WARMUP_FRAMES so the IIR AWB can settle before
     // any frame is transmitted; the seeded WB_R/WB_B values mean only a handful
     // of frames are needed to reach a stable colour balance.
-    const AWB_WARMUP_FRAMES: u32 = 5;
+    const AWB_WARMUP_FRAMES: u32 = 10;
     let mut frame_count: u32 = 0;
 
     loop {
