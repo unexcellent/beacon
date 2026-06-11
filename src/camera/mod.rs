@@ -19,6 +19,15 @@ static FRAME_READY: AtomicBool = AtomicBool::new(false);
 struct CaptureBuffer {
     buf: *mut c_void,
     len: usize,
+    row_bytes: usize,
+}
+impl CaptureBuffer {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn row_bytes(&self) -> usize {
+        self.row_bytes
+    }
 }
 
 unsafe extern "C" fn on_get_new_trans(
@@ -49,10 +58,19 @@ struct InnerCamera {
     ldo_chan: esp_ldo_channel_handle_t,
 }
 
+impl InnerCamera {
+    unsafe fn queue_receive(&self, capture_buf: &CaptureBuffer) -> Result<(), EspError> {
+        let mut trans: esp_cam_ctlr_trans_t = core::mem::zeroed();
+        trans.buffer = capture_buf.buf;
+        trans.buflen = capture_buf.len();
+        esp!(esp_cam_ctlr_receive(self.csi, &mut trans, 100))
+    }
+}
+
 pub struct Camera {
     sensor: CameraSensor,
     _inner: InnerCamera,
-    capture_buf: Box<CaptureBuffer>,
+    capture_buffer: Box<CaptureBuffer>,
     output_buf: *mut u8,
     output_resolution: (usize, usize),
     cap_row_bytes: usize,
@@ -60,32 +78,18 @@ pub struct Camera {
 
 impl Camera {
     pub unsafe fn new(sensor: CameraSensor, interface: CameraInterface) -> Result<Self, EspError> {
-        // Allocate capture buffer in PSRAM (64-byte aligned for L2 cache)
-        let cap_row_bytes = sensor.resolution.0 * 10 / 8;
-        let capture_fb_bytes = cap_row_bytes * sensor.resolution.1;
-        let cap_buf =
-            heap_caps_aligned_calloc(64, 1, capture_fb_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-        assert!(!cap_buf.is_null(), "capture buffer allocation failed");
-        let capture_buf = Box::new(CaptureBuffer {
-            buf: cap_buf,
-            len: capture_fb_bytes,
-        });
+        let capture_buffer = Self::allocate_buffer(&sensor);
 
-        let inner = interface.init(&sensor, &capture_buf)?;
-
-        // Seed first DMA receive transaction
-        let mut trans: esp_cam_ctlr_trans_t = core::mem::zeroed();
-        trans.buffer = capture_buf.buf;
-        trans.buflen = capture_fb_bytes;
-        esp!(esp_cam_ctlr_receive(inner.csi, &mut trans, 100))?;
+        let inner = interface.init(&sensor, &capture_buffer)?;
+        inner.queue_receive(&capture_buffer)?;
 
         sensor.enable(inner.i2c_dev);
 
-        // One-time image processing state initialization
         crate::image::init(sensor.red_gain_seed, sensor.blue_gain_seed);
+        let cap_row_bytes = capture_buffer.row_bytes();
 
         log::info!(
-            "camera streaming — capturing {}×{}",
+            "camera streaming — capturing {} x {}",
             sensor.resolution.0,
             sensor.resolution.1,
         );
@@ -93,7 +97,7 @@ impl Camera {
         Ok(Self {
             sensor,
             _inner: inner,
-            capture_buf,
+            capture_buffer,
             output_buf: core::ptr::null_mut(),
             output_resolution: (0, 0),
             cap_row_bytes,
@@ -120,7 +124,7 @@ impl Camera {
         }
 
         crate::image::process_frame(
-            self.capture_buf.buf as *const u8,
+            self.capture_buffer.buf as *const u8,
             self.output_buf,
             resolution.0,
             resolution.1,
@@ -132,6 +136,19 @@ impl Camera {
 
         core::slice::from_raw_parts(self.output_buf, resolution.0 * resolution.1 * 3)
     }
+
+    unsafe fn allocate_buffer(sensor: &CameraSensor) -> Box<CaptureBuffer> {
+        let cap_row_bytes = sensor.resolution.0 * 10 / 8;
+        let capture_fb_bytes = cap_row_bytes * sensor.resolution.1;
+        let cap_buf =
+            heap_caps_aligned_calloc(64, 1, capture_fb_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+        assert!(!cap_buf.is_null(), "capture buffer allocation failed");
+        Box::new(CaptureBuffer {
+            buf: cap_buf,
+            len: capture_fb_bytes,
+            row_bytes: cap_row_bytes,
+        })
+    }
 }
 
 impl Drop for Camera {
@@ -140,7 +157,7 @@ impl Drop for Camera {
             if !self.output_buf.is_null() {
                 heap_caps_free(self.output_buf as *mut c_void);
             }
-            heap_caps_free(self.capture_buf.buf);
+            heap_caps_free(self.capture_buffer.buf);
         }
     }
 }
