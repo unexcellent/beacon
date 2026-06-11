@@ -19,10 +19,23 @@ pub struct CameraSensor {
 }
 
 impl CameraSensor {
+    pub(super) unsafe fn write(&self, dev: i2c_master_dev_handle_t, reg: u16, val: u8) -> bool {
+        let buf = [(reg >> 8) as u8, reg as u8, val];
+        for attempt in 0..3u8 {
+            if i2c_master_transmit(dev, buf.as_ptr(), 3, 50) == ESP_OK as i32 {
+                return true;
+            }
+            if attempt < 2 {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        false
+    }
+
     pub(super) unsafe fn init(&self, i2c_dev: i2c_master_dev_handle_t) {
         let mut failures: u32 = 0;
         for &(reg, val) in self.init_table {
-            if !super::sensor_write(i2c_dev, reg, val) {
+            if !self.write(i2c_dev, reg, val) {
                 failures += 1;
             }
             if self.delayed_registers.contains(&reg) {

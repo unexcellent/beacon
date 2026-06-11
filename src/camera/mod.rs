@@ -41,19 +41,6 @@ unsafe extern "C" fn on_trans_finished(
     false
 }
 
-unsafe fn sensor_write(dev: i2c_master_dev_handle_t, reg: u16, val: u8) -> bool {
-    let buf = [(reg >> 8) as u8, reg as u8, val];
-    for attempt in 0..3u8 {
-        if i2c_master_transmit(dev, buf.as_ptr(), 3, 50) == ESP_OK as i32 {
-            return true;
-        }
-        if attempt < 2 {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-    false
-}
-
 struct InnerCamera {
     csi: esp_cam_ctlr_handle_t,
     isp: isp_proc_handle_t,
@@ -64,7 +51,6 @@ struct InnerCamera {
 
 pub struct Camera {
     sensor: CameraSensor,
-    interface: CameraInterface,
     _inner: InnerCamera,
     capture_buf: Box<CaptureBuffer>,
     output_buf: *mut u8,
@@ -73,21 +59,17 @@ pub struct Camera {
 }
 
 impl Camera {
-    pub unsafe fn new(
-        sensor: CameraSensor,
-        interface: CameraInterface,
-    ) -> Result<Self, EspError> {
+    pub unsafe fn new(sensor: CameraSensor, interface: CameraInterface) -> Result<Self, EspError> {
         // Allocate capture buffer in PSRAM (64-byte aligned for L2 cache)
         let cap_row_bytes = sensor.resolution.0 * 10 / 8;
         let capture_fb_bytes = cap_row_bytes * sensor.resolution.1;
-        let cap_buf = heap_caps_aligned_calloc(
-            64,
-            1,
-            capture_fb_bytes,
-            MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA,
-        );
+        let cap_buf =
+            heap_caps_aligned_calloc(64, 1, capture_fb_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
         assert!(!cap_buf.is_null(), "capture buffer allocation failed");
-        let capture_buf = Box::new(CaptureBuffer { buf: cap_buf, len: capture_fb_bytes });
+        let capture_buf = Box::new(CaptureBuffer {
+            buf: cap_buf,
+            len: capture_fb_bytes,
+        });
 
         let inner = interface.init(&sensor, &capture_buf)?;
 
@@ -98,8 +80,8 @@ impl Camera {
         esp!(esp_cam_ctlr_receive(inner.csi, &mut trans, 100))?;
 
         // Enable sensor streaming; wait 200 ms for MIPI lanes to stabilize
-        sensor_write(inner.i2c_dev, 0x302c, 0x00);
-        sensor_write(inner.i2c_dev, 0x0100, 0x01);
+        sensor.write(inner.i2c_dev, 0x302c, 0x00);
+        sensor.write(inner.i2c_dev, 0x0100, 0x01);
         std::thread::sleep(Duration::from_millis(200));
 
         // One-time image processing state initialization
@@ -113,7 +95,6 @@ impl Camera {
 
         Ok(Self {
             sensor,
-            interface,
             _inner: inner,
             capture_buf,
             output_buf: core::ptr::null_mut(),
@@ -130,7 +111,10 @@ impl Camera {
             }
             let out_bytes = resolution.0 * resolution.1 * 3;
             self.output_buf = heap_caps_malloc(out_bytes, MALLOC_CAP_SPIRAM) as *mut u8;
-            assert!(!self.output_buf.is_null(), "output buffer allocation failed");
+            assert!(
+                !self.output_buf.is_null(),
+                "output buffer allocation failed"
+            );
             self.output_resolution = *resolution;
         }
 
