@@ -44,7 +44,7 @@ pub unsafe fn process_frame(
     sw: usize,
     sh: usize,
     row_bytes: usize,
-    black_level: f32,
+    black_level: u8,
 ) {
     // Precompute which (row_parity, col_parity) pair maps to R vs B so the match
     // is lifted out of the hot inner loop by the compiler.
@@ -57,7 +57,7 @@ pub unsafe fn process_frame(
     let mut fb: u64 = 0;
     let wb_r = *core::ptr::addr_of!(WB_R);
     let wb_b = *core::ptr::addr_of!(WB_B);
-    let bl = black_level;
+    let bl = black_level as f32;
     let bl_scale = 255.0f32 / (255.0f32 - bl).max(1.0);
 
     for dy in 0..dh {

@@ -3,6 +3,7 @@
 mod audio;
 mod camera;
 mod image;
+mod old_camera;
 
 use std::io::Write;
 
@@ -45,7 +46,8 @@ unsafe fn camera_capture_loop() -> ! {
     usb_serial_jtag_vfs_set_tx_line_endings(2);
 
     let mut camera =
-        camera::OldCameraChannel::new(camera::SC850SL, camera::BEACON_INTERFACE).unwrap();
+        old_camera::OldCameraChannel::new(old_camera::SC850SL, old_camera::BEACON_INTERFACE)
+            .unwrap();
     let (out_w, out_h) = camera.output_size();
 
     // Skip the first AWB_WARMUP_FRAMES so the IIR AWB can settle before
