@@ -11,16 +11,22 @@ unsafe extern "C" {
 }
 
 static FRAME_READY: AtomicBool = AtomicBool::new(false);
-static mut CAPTURE_BUF: *mut c_void = core::ptr::null_mut();
-static mut CAPTURE_FB_BYTES_S: usize = 0;
+
+// Holds the capture buffer pointer and length for the CSI DMA callbacks.
+// Heap-allocated so its address is stable after being registered as userdata.
+struct CaptureBuffer {
+    buf: *mut c_void,
+    len: usize,
+}
 
 unsafe extern "C" fn on_get_new_trans(
     _: esp_cam_ctlr_handle_t,
     trans: *mut esp_cam_ctlr_trans_t,
-    _: *mut c_void,
+    user_ctx: *mut c_void,
 ) -> bool {
-    (*trans).buffer = CAPTURE_BUF;
-    (*trans).buflen = CAPTURE_FB_BYTES_S;
+    let cap = &*(user_ctx as *const CaptureBuffer);
+    (*trans).buffer = cap.buf;
+    (*trans).buflen = cap.len;
     false
 }
 
@@ -61,7 +67,7 @@ pub struct OldCameraSensor {
     /// Per-lane MIPI bit rate in Mbps.
     pub lane_bit_rate_mbps: i32,
     /// Black-level pedestal in 8-bit space (10-bit sensor value >> 2).
-    pub black_level: f32,
+    pub black_level: u8,
     /// Initial white-balance red gain seed (green = 1.0 reference).
     pub wb_r_seed: f32,
     /// Initial white-balance blue gain seed (green = 1.0 reference).
@@ -99,7 +105,7 @@ pub const SC850SL: OldCameraSensor = OldCameraSensor {
     capture_height: 2160,
     data_lane_num: 2,
     lane_bit_rate_mbps: 1080_i32,
-    black_level: 16.0,
+    black_level: 16,
     wb_r_seed: 1.5,
     wb_b_seed: 1.5,
     init_table: SC850SL_INIT_TABLE,
@@ -173,8 +179,8 @@ const SC850SL_INIT_TABLE: &[(u16, u8)] = &[
 
 /// An active camera channel configured for a specific sensor and interface.
 ///
-/// The channel is fully initialized and streaming on return from [`new`](CameraChannel::new).
-/// Call [`capture_rgb888`](CameraChannel::capture_rgb888) to wait for the next frame and
+/// The channel is fully initialized and streaming on return from [`new`](OldCameraChannel::new).
+/// Call [`capture_rgb888`](OldCameraChannel::capture_rgb888) to wait for the next frame and
 /// retrieve the downscaled, white-balanced RGB888 image. The underlying hardware is released
 /// automatically on drop.
 pub struct OldCameraChannel {
@@ -183,13 +189,14 @@ pub struct OldCameraChannel {
     _i2c_dev: i2c_master_dev_handle_t,
     _i2c_bus: i2c_master_bus_handle_t,
     _ldo_chan: esp_ldo_channel_handle_t,
+    capture: Box<CaptureBuffer>,
     output_buf: *mut u8,
     out_w: usize,
     out_h: usize,
     cap_w: usize,
     cap_h: usize,
     cap_row_bytes: usize,
-    black_level: f32,
+    black_level: u8,
 }
 
 impl OldCameraChannel {
@@ -290,8 +297,7 @@ impl OldCameraChannel {
         let cap_buf =
             heap_caps_aligned_calloc(64, 1, capture_fb_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
         assert!(!cap_buf.is_null(), "capture buffer allocation failed");
-        CAPTURE_BUF = cap_buf;
-        CAPTURE_FB_BYTES_S = capture_fb_bytes;
+        let capture = Box::new(CaptureBuffer { buf: cap_buf, len: capture_fb_bytes });
 
         let out_buf = heap_caps_malloc(out_bytes, MALLOC_CAP_SPIRAM);
         assert!(!out_buf.is_null(), "output buffer allocation failed");
@@ -317,7 +323,7 @@ impl OldCameraChannel {
         esp!(esp_cam_ctlr_register_event_callbacks(
             csi,
             &cbs,
-            core::ptr::null_mut()
+            &*capture as *const CaptureBuffer as *mut c_void,
         ))?;
         esp!(esp_cam_ctlr_enable(csi))?;
         esp!(esp_cam_ctlr_start(csi))?;
@@ -337,7 +343,7 @@ impl OldCameraChannel {
 
         // 9. Seed first DMA receive transaction
         let mut trans: esp_cam_ctlr_trans_t = core::mem::zeroed();
-        trans.buffer = CAPTURE_BUF;
+        trans.buffer = capture.buf;
         trans.buflen = capture_fb_bytes;
         esp!(esp_cam_ctlr_receive(csi, &mut trans, 100))?;
 
@@ -363,6 +369,7 @@ impl OldCameraChannel {
             _i2c_dev: i2c_dev,
             _i2c_bus: i2c_bus,
             _ldo_chan: ldo_chan,
+            capture,
             output_buf: out_buf as *mut u8,
             out_w: interface.output_width,
             out_h: interface.output_height,
@@ -380,7 +387,7 @@ impl OldCameraChannel {
             std::thread::sleep(Duration::from_millis(1));
         }
         crate::image::process_frame(
-            CAPTURE_BUF as *const u8,
+            self.capture.buf as *const u8,
             self.output_buf,
             self.out_w,
             self.out_h,
@@ -402,8 +409,7 @@ impl Drop for OldCameraChannel {
     fn drop(&mut self) {
         unsafe {
             heap_caps_free(self.output_buf as *mut c_void);
-            heap_caps_free(CAPTURE_BUF);
-            CAPTURE_BUF = core::ptr::null_mut();
+            heap_caps_free(self.capture.buf);
         }
     }
 }
