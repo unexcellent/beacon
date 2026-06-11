@@ -79,10 +79,7 @@ impl Camera {
         trans.buflen = capture_fb_bytes;
         esp!(esp_cam_ctlr_receive(inner.csi, &mut trans, 100))?;
 
-        // Enable sensor streaming; wait 200 ms for MIPI lanes to stabilize
-        sensor.write(inner.i2c_dev, 0x302c, 0x00);
-        sensor.write(inner.i2c_dev, 0x0100, 0x01);
-        std::thread::sleep(Duration::from_millis(200));
+        sensor.enable(inner.i2c_dev);
 
         // One-time image processing state initialization
         crate::image::init(sensor.red_gain_seed, sensor.blue_gain_seed);

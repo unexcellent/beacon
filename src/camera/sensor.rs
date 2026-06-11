@@ -19,10 +19,25 @@ pub struct CameraSensor {
 }
 
 impl CameraSensor {
-    pub(super) unsafe fn write(&self, dev: i2c_master_dev_handle_t, reg: u16, val: u8) -> bool {
+    pub(super) unsafe fn init(&self, i2c_dev: i2c_master_dev_handle_t) {
+        for &(reg, val) in self.init_table {
+            self.write(i2c_dev, reg, val);
+            if self.delayed_registers.contains(&reg) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    pub(super) unsafe fn enable(&self, i2c_dev: i2c_master_dev_handle_t) {
+        self.write(i2c_dev, 0x302c, 0x00);
+        self.write(i2c_dev, 0x0100, 0x01);
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    unsafe fn write(&self, dev: i2c_master_dev_handle_t, reg: u16, val: u8) -> bool {
         let buf = [(reg >> 8) as u8, reg as u8, val];
         for attempt in 0..3u8 {
-            if i2c_master_transmit(dev, buf.as_ptr(), 3, 50) == ESP_OK as i32 {
+            if i2c_master_transmit(dev, buf.as_ptr(), 3, 50) == ESP_OK {
                 return true;
             }
             if attempt < 2 {
@@ -30,25 +45,6 @@ impl CameraSensor {
             }
         }
         false
-    }
-
-    pub(super) unsafe fn init(&self, i2c_dev: i2c_master_dev_handle_t) {
-        let mut failures: u32 = 0;
-        for &(reg, val) in self.init_table {
-            if !self.write(i2c_dev, reg, val) {
-                failures += 1;
-            }
-            if self.delayed_registers.contains(&reg) {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        }
-        if failures > 0 {
-            log::warn!(
-                "sensor init: {}/{} register writes failed",
-                failures,
-                self.init_table.len()
-            );
-        }
     }
 }
 
