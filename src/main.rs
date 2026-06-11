@@ -2,6 +2,7 @@
 
 mod audio;
 mod camera;
+mod image;
 
 use std::io::Write;
 
@@ -43,7 +44,8 @@ unsafe fn camera_capture_loop() -> ! {
     // (including any 0x0A values) pass through to the host without insertion.
     usb_serial_jtag_vfs_set_tx_line_endings(2);
 
-    let mut camera = camera::CameraChannel::new(camera::SC850SL, camera::BEACON_INTERFACE).unwrap();
+    let mut camera =
+        camera::OldCameraChannel::new(camera::SC850SL, camera::BEACON_INTERFACE).unwrap();
     let (out_w, out_h) = camera.output_size();
 
     // Skip the first AWB_WARMUP_FRAMES so the IIR AWB can settle before
@@ -59,7 +61,7 @@ unsafe fn camera_capture_loop() -> ! {
 
         frame_count += 1;
         if frame_count <= AWB_WARMUP_FRAMES {
-            let (wb_r, wb_b) = camera::current_wb_gains();
+            let (wb_r, wb_b) = image::current_wb_gains();
             log::info!(
                 "awb warmup {}/{}: wb_r={:.2} wb_b={:.2}",
                 frame_count,
@@ -72,7 +74,7 @@ unsafe fn camera_capture_loop() -> ! {
 
         send_frame(rgb, out_w, out_h);
 
-        let (wb_r, wb_b) = camera::current_wb_gains();
+        let (wb_r, wb_b) = image::current_wb_gains();
         log::info!(
             "frame sent: isp={}ms total={}ms wb_r={:.2} wb_b={:.2}",
             t_isp.as_millis(),

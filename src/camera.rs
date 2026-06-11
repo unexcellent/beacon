@@ -14,10 +14,6 @@ static FRAME_READY: AtomicBool = AtomicBool::new(false);
 static mut CAPTURE_BUF: *mut c_void = core::ptr::null_mut();
 static mut CAPTURE_FB_BYTES_S: usize = 0;
 
-static mut WB_R: f32 = 0.0;
-static mut WB_B: f32 = 0.0;
-static mut GAMMA_LUT: [u8; 256] = [0u8; 256];
-
 unsafe extern "C" fn on_get_new_trans(
     _: esp_cam_ctlr_handle_t,
     trans: *mut esp_cam_ctlr_trans_t,
@@ -37,22 +33,6 @@ unsafe extern "C" fn on_trans_finished(
     false
 }
 
-unsafe fn init_gamma() {
-    for i in 0..256usize {
-        let c = (i as f32 / 255.0).powf(1.0 / 2.2);
-        let v = (c * 255.0 + 0.5) as u32;
-        GAMMA_LUT[i] = if v > 255 { 255 } else { v as u8 };
-    }
-}
-
-// Read the 8 MSBs of the x-th pixel from a packed RAW10 row.
-// Layout: 4 pixels per 5-byte group — bytes 0-3 hold each pixel's top 8 bits,
-// byte 4 holds the 2 LSBs of all four (discarded here, not needed for an 8-bit path).
-#[inline(always)]
-unsafe fn raw10_get8(row: *const u8, x: usize) -> u32 {
-    *row.add((x >> 2) * 5 + (x & 3)) as u32
-}
-
 unsafe fn sensor_write(dev: i2c_master_dev_handle_t, reg: u16, val: u8) -> bool {
     let buf = [(reg >> 8) as u8, reg as u8, val];
     for attempt in 0..3u8 {
@@ -66,137 +46,10 @@ unsafe fn sensor_write(dev: i2c_master_dev_handle_t, reg: u16, val: u8) -> bool 
     false
 }
 
-// Box-filter downscale from capture resolution (packed RAW10) → dw×dh RGB888.
-//
-// Pipeline per output pixel:
-//   box-filter demosaic → black-level subtract → range-restore → gray-world WB
-//   → sRGB gamma → pack RGB888
-//
-// Gray-world AWB is updated once per frame from BL-corrected linear means; gains
-// are IIR-smoothed (α = 0.5) so they converge within ~10 frames.
-unsafe fn process_frame(
-    src: *const u8,
-    dst: *mut u8,
-    dw: usize,
-    dh: usize,
-    sw: usize,
-    sh: usize,
-    row_bytes: usize,
-    black_level: f32,
-    bayer_order: BayerOrder,
-) {
-    // Precompute which (row_parity, col_parity) pair maps to R vs B so the match
-    // is lifted out of the hot inner loop by the compiler.
-    let (red_yodd, red_xodd) = match bayer_order {
-        BayerOrder::Bggr => (1usize, 1usize),
-        BayerOrder::Rggb => (0, 0),
-        BayerOrder::Grbg => (0, 1),
-        BayerOrder::Gbrg => (1, 0),
-    };
-    let (blue_yodd, blue_xodd) = match bayer_order {
-        BayerOrder::Bggr => (0usize, 0usize),
-        BayerOrder::Rggb => (1, 1),
-        BayerOrder::Grbg => (1, 0),
-        BayerOrder::Gbrg => (0, 1),
-    };
-
-    let out = core::slice::from_raw_parts_mut(dst, dw * dh * 3);
-    let mut fr: u64 = 0;
-    let mut fg: u64 = 0;
-    let mut fb: u64 = 0;
-    let wb_r = *core::ptr::addr_of!(WB_R);
-    let wb_b = *core::ptr::addr_of!(WB_B);
-    let bl = black_level;
-    let bl_scale = 255.0f32 / (255.0f32 - bl).max(1.0);
-
-    for dy in 0..dh {
-        // Yield every 40 rows so the IDLE task can run and reset the task watchdog.
-        // Without this, the ~3 s ISP computation starves IDLE for > 5 s and the WDT fires.
-        if dy % 40 == 0 {
-            vTaskDelay(1);
-        }
-
-        let sy0 = (dy * sh) / dh;
-        let sy1 = (((dy + 1) * sh) / dh).max(sy0 + 2).min(sh);
-        for dx in 0..dw {
-            let sx0 = (dx * sw) / dw;
-            let sx1 = (((dx + 1) * sw) / dw).max(sx0 + 2).min(sw);
-            let mut sr: u32 = 0;
-            let mut cr: u32 = 0;
-            let mut sg: u32 = 0;
-            let mut cg: u32 = 0;
-            let mut sb: u32 = 0;
-            let mut cb: u32 = 0;
-            for sy in sy0..sy1 {
-                let row = src.add(sy * row_bytes);
-                let yodd = sy & 1;
-                for sx in sx0..sx1 {
-                    let v = raw10_get8(row, sx);
-                    let xodd = sx & 1;
-                    if yodd == red_yodd && xodd == red_xodd {
-                        sr += v;
-                        cr += 1;
-                    } else if yodd == blue_yodd && xodd == blue_xodd {
-                        sb += v;
-                        cb += 1;
-                    } else {
-                        sg += v;
-                        cg += 1;
-                    }
-                }
-            }
-            let ar = if cr > 0 { (sr / cr) as f32 } else { 0.0 };
-            let ag = if cg > 0 { (sg / cg) as f32 } else { 0.0 };
-            let ab = if cb > 0 { (sb / cb) as f32 } else { 0.0 };
-            let lr = ((ar - bl) * bl_scale).max(0.0);
-            let lg = ((ag - bl) * bl_scale).max(0.0);
-            let lb = ((ab - bl) * bl_scale).max(0.0);
-            fr += lr as u64;
-            fg += lg as u64;
-            fb += lb as u64;
-            let lr = lr * wb_r;
-            let lb = lb * wb_b;
-            let ir = (lr + 0.5) as i32;
-            let ig = (lg + 0.5) as i32;
-            let ib = (lb + 0.5) as i32;
-            let ir = ir.clamp(0, 255) as usize;
-            let ig = ig.clamp(0, 255) as usize;
-            let ib = ib.clamp(0, 255) as usize;
-            let idx = (dy * dw + dx) * 3;
-            out[idx] = GAMMA_LUT[ir];
-            out[idx + 1] = GAMMA_LUT[ig];
-            out[idx + 2] = GAMMA_LUT[ib];
-        }
-    }
-    if fr > 0 && fg > 0 && fb > 0 {
-        let gr = (fg as f32 / fr as f32).clamp(0.5, 4.0);
-        let gb = (fg as f32 / fb as f32).clamp(0.5, 4.0);
-        WB_R = WB_R * 0.5 + gr * 0.5;
-        WB_B = WB_B * 0.5 + gb * 0.5;
-    }
-}
-
-/// Bayer colour filter array order of the sensor output.
-///
-/// Describes which colour sits at the even-row/even-column pixel. The pattern repeats
-/// every 2×2 pixels; the two diagonally opposite corners are always the same colour
-/// (for standard RGGB/BGGR) or always green (for GRBG/GBRG).
-#[derive(Clone, Copy)]
-pub enum BayerOrder {
-    /// Blue at (even row, even col), Red at (odd row, odd col).
-    Bggr,
-    /// Red at (even row, even col), Blue at (odd row, odd col).
-    Rggb,
-    /// Green at (even row, even col), Red at (even row, odd col).
-    Grbg,
-    /// Green at (even row, even col), Blue at (even row, odd col).
-    Gbrg,
-}
-
 /// Describes sensor-specific settings: resolution, MIPI config, I2C address, and init registers.
 ///
 /// These map to the sensor datasheet and are fixed for a given sensor variant.
-pub struct CameraSensor {
+pub struct OldCameraSensor {
     /// 7-bit I2C device address.
     pub i2c_address: u16,
     /// Full-resolution capture width in pixels.
@@ -207,8 +60,6 @@ pub struct CameraSensor {
     pub data_lane_num: u8,
     /// Per-lane MIPI bit rate in Mbps.
     pub lane_bit_rate_mbps: i32,
-    /// Bayer CFA layout of the sensor RAW output.
-    pub bayer_order: BayerOrder,
     /// Black-level pedestal in 8-bit space (10-bit sensor value >> 2).
     pub black_level: f32,
     /// Initial white-balance red gain seed (green = 1.0 reference).
@@ -224,7 +75,7 @@ pub struct CameraSensor {
 /// Describes the physical camera interface: I2C wiring, GPIO, power, and output resolution.
 ///
 /// These settings are board-level and independent of the sensor variant.
-pub struct CameraInterface {
+pub struct OldCameraInterface {
     /// GPIO pin for I2C SDA.
     pub sda_pin: gpio_num_t,
     /// GPIO pin for I2C SCL.
@@ -242,13 +93,12 @@ pub struct CameraInterface {
 }
 
 /// SC850SL sensor at 4K/15 fps, 2-lane MIPI, RAW10.
-pub const SC850SL: CameraSensor = CameraSensor {
+pub const SC850SL: OldCameraSensor = OldCameraSensor {
     i2c_address: 0x30,
     capture_width: 3840,
     capture_height: 2160,
     data_lane_num: 2,
     lane_bit_rate_mbps: 1080_i32,
-    bayer_order: BayerOrder::Rggb,
     black_level: 16.0,
     wb_r_seed: 1.5,
     wb_b_seed: 1.5,
@@ -257,7 +107,7 @@ pub const SC850SL: CameraSensor = CameraSensor {
 };
 
 /// Default ESP32-P4 camera board wiring for the beacon hardware.
-pub const BEACON_INTERFACE: CameraInterface = CameraInterface {
+pub const BEACON_INTERFACE: OldCameraInterface = OldCameraInterface {
     sda_pin: 11,
     scl_pin: 9,
     xshutdn_pin: 54,
@@ -327,7 +177,7 @@ const SC850SL_INIT_TABLE: &[(u16, u8)] = &[
 /// Call [`capture_rgb888`](CameraChannel::capture_rgb888) to wait for the next frame and
 /// retrieve the downscaled, white-balanced RGB888 image. The underlying hardware is released
 /// automatically on drop.
-pub struct CameraChannel {
+pub struct OldCameraChannel {
     _csi: esp_cam_ctlr_handle_t,
     _isp: isp_proc_handle_t,
     _i2c_dev: i2c_master_dev_handle_t,
@@ -340,16 +190,18 @@ pub struct CameraChannel {
     cap_h: usize,
     cap_row_bytes: usize,
     black_level: f32,
-    bayer_order: BayerOrder,
 }
 
-impl CameraChannel {
+impl OldCameraChannel {
     /// Initializes the camera sensor and CSI controller, then starts streaming.
     ///
     /// Performs GPIO reset, I2C sensor programming, PSRAM buffer allocation, CSI/ISP
     /// hardware setup, and seeds the first DMA transaction. Returns when the sensor is
     /// actively streaming and the first frame may arrive at any moment.
-    pub unsafe fn new(sensor: CameraSensor, interface: CameraInterface) -> Result<Self, EspError> {
+    pub unsafe fn new(
+        sensor: OldCameraSensor,
+        interface: OldCameraInterface,
+    ) -> Result<Self, EspError> {
         // 1. Hold sensor in reset (XSHUTDN active-low)
         let gpio_cfg = gpio_config_t {
             pin_bit_mask: 1u64 << interface.xshutdn_pin,
@@ -380,7 +232,11 @@ impl CameraChannel {
         i2c_dev_cfg.scl_speed_hz = 100_000;
         i2c_dev_cfg.scl_wait_us = 50_000;
         let mut i2c_dev: i2c_master_dev_handle_t = core::ptr::null_mut();
-        esp!(i2c_master_bus_add_device(i2c_bus, &i2c_dev_cfg, &mut i2c_dev))?;
+        esp!(i2c_master_bus_add_device(
+            i2c_bus,
+            &i2c_dev_cfg,
+            &mut i2c_dev
+        ))?;
 
         // 3. Release reset; give the sensor 300 ms to bring its I2C interface up,
         //    then retry bus recovery until the stuck SDA/SCL lines are clear.
@@ -458,7 +314,11 @@ impl CameraChannel {
             on_get_new_trans: Some(on_get_new_trans),
             on_trans_finished: Some(on_trans_finished),
         };
-        esp!(esp_cam_ctlr_register_event_callbacks(csi, &cbs, core::ptr::null_mut()))?;
+        esp!(esp_cam_ctlr_register_event_callbacks(
+            csi,
+            &cbs,
+            core::ptr::null_mut()
+        ))?;
         esp!(esp_cam_ctlr_enable(csi))?;
         esp!(esp_cam_ctlr_start(csi))?;
 
@@ -470,12 +330,7 @@ impl CameraChannel {
         isp_cfg.output_data_color_type = isp_color_t_ISP_COLOR_RGB565;
         isp_cfg.h_res = sensor.capture_width as u32;
         isp_cfg.v_res = sensor.capture_height as u32;
-        isp_cfg.bayer_order = match sensor.bayer_order {
-            BayerOrder::Bggr => color_raw_element_order_t_COLOR_RAW_ELEMENT_ORDER_BGGR,
-            BayerOrder::Rggb => color_raw_element_order_t_COLOR_RAW_ELEMENT_ORDER_RGGB,
-            BayerOrder::Grbg => color_raw_element_order_t_COLOR_RAW_ELEMENT_ORDER_GRBG,
-            BayerOrder::Gbrg => color_raw_element_order_t_COLOR_RAW_ELEMENT_ORDER_GBRG,
-        };
+        isp_cfg.bayer_order = color_raw_element_order_t_COLOR_RAW_ELEMENT_ORDER_RGGB;
         let mut isp: isp_proc_handle_t = core::ptr::null_mut();
         esp!(esp_isp_new_processor(&isp_cfg, &mut isp))?;
         isp_bypass_raw10_patch(sensor.capture_width as u32, sensor.capture_height as u32);
@@ -492,9 +347,7 @@ impl CameraChannel {
         std::thread::sleep(Duration::from_millis(200));
 
         // 11. One-time ISP state initialization
-        WB_R = sensor.wb_r_seed;
-        WB_B = sensor.wb_b_seed;
-        init_gamma();
+        crate::image::init(sensor.wb_r_seed, sensor.wb_b_seed);
 
         log::info!(
             "camera streaming — capturing {}×{} → {}×{} RGB888",
@@ -517,7 +370,6 @@ impl CameraChannel {
             cap_h: sensor.capture_height,
             cap_row_bytes,
             black_level: sensor.black_level,
-            bayer_order: sensor.bayer_order,
         })
     }
 
@@ -527,7 +379,7 @@ impl CameraChannel {
         while !FRAME_READY.swap(false, Ordering::AcqRel) {
             std::thread::sleep(Duration::from_millis(1));
         }
-        process_frame(
+        crate::image::process_frame(
             CAPTURE_BUF as *const u8,
             self.output_buf,
             self.out_w,
@@ -536,7 +388,6 @@ impl CameraChannel {
             self.cap_h,
             self.cap_row_bytes,
             self.black_level,
-            self.bayer_order,
         );
         core::slice::from_raw_parts(self.output_buf, self.out_w * self.out_h * 3)
     }
@@ -547,15 +398,7 @@ impl CameraChannel {
     }
 }
 
-/// Returns the current white-balance gains as `(wb_r, wb_b)` with green as the reference (1.0).
-///
-/// Reads the IIR-smoothed gains updated by the last [`CameraChannel::capture_rgb888`] call.
-/// This is a free function so it can be called without conflicting with an active frame borrow.
-pub unsafe fn current_wb_gains() -> (f32, f32) {
-    (*core::ptr::addr_of!(WB_R), *core::ptr::addr_of!(WB_B))
-}
-
-impl Drop for CameraChannel {
+impl Drop for OldCameraChannel {
     fn drop(&mut self) {
         unsafe {
             heap_caps_free(self.output_buf as *mut c_void);
