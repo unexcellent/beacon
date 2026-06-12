@@ -1,5 +1,6 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
+mod image;
 mod interface;
 mod sensor;
 
@@ -9,6 +10,7 @@ use std::time::Duration;
 
 use esp_idf_sys::*;
 
+pub use image::{current_wb_gains, Image};
 pub use interface::{CameraInterface, MIPI};
 pub use sensor::{CameraSensor, SC850SL};
 
@@ -22,10 +24,10 @@ struct CaptureBuffer {
     row_bytes: usize,
 }
 impl CaptureBuffer {
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.len
     }
-    pub fn row_bytes(&self) -> usize {
+    fn row_bytes(&self) -> usize {
         self.row_bytes
     }
 }
@@ -67,26 +69,25 @@ impl InnerCamera {
     }
 }
 
+const OUTPUT_WIDTH: usize = sstv::Mode::Robot36.image_width() as usize;
+const OUTPUT_HEIGHT: usize = sstv::Mode::Robot36.image_height() as usize;
+
 pub struct Camera {
     sensor: CameraSensor,
     _inner: InnerCamera,
     capture_buffer: Box<CaptureBuffer>,
-    output_buf: *mut u8,
-    output_resolution: (usize, usize),
-    cap_row_bytes: usize,
 }
 
 impl Camera {
     pub unsafe fn new(sensor: CameraSensor, interface: CameraInterface) -> Result<Self, EspError> {
-        let capture_buffer = Self::allocate_buffer(&sensor);
+        let capture_buffer = Self::allocate_capture_buffer(&sensor);
 
         let inner = interface.init(&sensor, &capture_buffer)?;
         inner.queue_receive(&capture_buffer)?;
 
         sensor.enable(inner.i2c_dev);
 
-        crate::image::init(sensor.red_gain_seed, sensor.blue_gain_seed);
-        let cap_row_bytes = capture_buffer.row_bytes();
+        image::init(sensor.red_gain_seed, sensor.blue_gain_seed);
 
         log::info!(
             "camera streaming — capturing {} x {}",
@@ -98,46 +99,24 @@ impl Camera {
             sensor,
             _inner: inner,
             capture_buffer,
-            output_buf: core::ptr::null_mut(),
-            output_resolution: (0, 0),
-            cap_row_bytes,
         })
     }
 
-    pub unsafe fn capture(&mut self, resolution: &(usize, usize)) -> &[u8] {
-        // Reallocate output buffer if resolution changed
-        if *resolution != self.output_resolution {
-            if !self.output_buf.is_null() {
-                heap_caps_free(self.output_buf as *mut c_void);
-            }
-            let out_bytes = resolution.0 * resolution.1 * 3;
-            self.output_buf = heap_caps_malloc(out_bytes, MALLOC_CAP_SPIRAM) as *mut u8;
-            assert!(
-                !self.output_buf.is_null(),
-                "output buffer allocation failed"
-            );
-            self.output_resolution = *resolution;
-        }
-
+    pub unsafe fn capture(&mut self) -> Image {
         while !FRAME_READY.swap(false, Ordering::AcqRel) {
             std::thread::sleep(Duration::from_millis(1));
         }
 
-        crate::image::process_frame(
+        Image::new(
             self.capture_buffer.buf as *const u8,
-            self.output_buf,
-            resolution.0,
-            resolution.1,
             self.sensor.resolution.0,
             self.sensor.resolution.1,
-            self.cap_row_bytes,
+            self.capture_buffer.row_bytes(),
             self.sensor.black_level,
-        );
-
-        core::slice::from_raw_parts(self.output_buf, resolution.0 * resolution.1 * 3)
+        )
     }
 
-    unsafe fn allocate_buffer(sensor: &CameraSensor) -> Box<CaptureBuffer> {
+    unsafe fn allocate_capture_buffer(sensor: &CameraSensor) -> Box<CaptureBuffer> {
         let cap_row_bytes = sensor.resolution.0 * 10 / 8;
         let capture_fb_bytes = cap_row_bytes * sensor.resolution.1;
         let cap_buf =
@@ -154,9 +133,6 @@ impl Camera {
 impl Drop for Camera {
     fn drop(&mut self) {
         unsafe {
-            if !self.output_buf.is_null() {
-                heap_caps_free(self.output_buf as *mut c_void);
-            }
             heap_caps_free(self.capture_buffer.buf);
         }
     }

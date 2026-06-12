@@ -2,9 +2,10 @@
 
 mod audio;
 mod camera;
-mod image;
 
 use std::io::Write;
+
+use esp_idf_sys::*;
 
 unsafe extern "C" {
     // ESP_LINE_ENDINGS_LF = 2: pass LF bytes through unchanged (no CRLF expansion).
@@ -44,10 +45,13 @@ unsafe fn camera_capture_loop() -> ! {
     // (including any 0x0A values) pass through to the host without insertion.
     usb_serial_jtag_vfs_set_tx_line_endings(2);
 
-    const OUTPUT_RESOLUTION: (usize, usize) = (320, 240);
+    let mut camera = camera::Camera::new(camera::SC850SL, camera::MIPI).unwrap();
 
-    let mut camera =
-        camera::Camera::new(camera::SC850SL, camera::MIPI).unwrap();
+    // Output buffer in PSRAM for assembling RGB888 bytes before USB transmission.
+    let out_bytes = 320 * 240 * 3;
+    let out_ptr = heap_caps_malloc(out_bytes, MALLOC_CAP_SPIRAM) as *mut u8;
+    assert!(!out_ptr.is_null(), "output buffer allocation failed");
+    let out_buf = core::slice::from_raw_parts_mut(out_ptr, out_bytes);
 
     // Skip the first AWB_WARMUP_FRAMES so the IIR AWB can settle before
     // any frame is transmitted; the seeded WB_R/WB_B values mean only a handful
@@ -57,12 +61,18 @@ unsafe fn camera_capture_loop() -> ! {
 
     loop {
         let t0 = std::time::Instant::now();
-        let rgb = camera.capture(&OUTPUT_RESOLUTION);
+
+        for (i, pixel) in camera.capture().enumerate() {
+            out_buf[i * 3]     = pixel.red();
+            out_buf[i * 3 + 1] = pixel.green();
+            out_buf[i * 3 + 2] = pixel.blue();
+        }
+
         let t_isp = t0.elapsed();
 
         frame_count += 1;
         if frame_count <= AWB_WARMUP_FRAMES {
-            let (wb_r, wb_b) = image::current_wb_gains();
+            let (wb_r, wb_b) = camera::current_wb_gains();
             log::info!(
                 "awb warmup {}/{}: wb_r={:.2} wb_b={:.2}",
                 frame_count,
@@ -73,9 +83,9 @@ unsafe fn camera_capture_loop() -> ! {
             continue;
         }
 
-        send_frame(rgb, OUTPUT_RESOLUTION.0, OUTPUT_RESOLUTION.1);
+        send_frame(out_buf, 320, 240);
 
-        let (wb_r, wb_b) = image::current_wb_gains();
+        let (wb_r, wb_b) = camera::current_wb_gains();
         log::info!(
             "frame sent: isp={}ms total={}ms wb_r={:.2} wb_b={:.2}",
             t_isp.as_millis(),
