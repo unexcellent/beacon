@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use esp_idf_sys::*;
 
-use super::{CaptureBuffer, CameraSensor, InnerCamera};
+use super::{CameraSensor, CaptureBuffer, InnerCamera};
 
 unsafe extern "C" {
     fn isp_bypass_raw10_patch(h_res: u32, v_res: u32);
@@ -32,7 +32,24 @@ impl CameraInterface {
         sensor: &CameraSensor,
         capture: &CaptureBuffer,
     ) -> Result<InnerCamera, EspError> {
-        // 1. Hold sensor in reset (XSHUTDN active-low)
+        self.enable_reset()?;
+        let (mut i2c_bus, i2c_dev) = self.set_up_i2c(sensor)?;
+        self.disable_reset(&mut i2c_bus)?;
+        sensor.init(i2c_dev);
+        let ldo_chan = self.enable_power()?;
+        let csi = self.set_up_controller(sensor, capture)?;
+        let isp = self.set_up_signal_processor(sensor)?;
+
+        Ok(InnerCamera {
+            csi,
+            isp,
+            i2c_dev,
+            i2c_bus,
+            ldo_chan,
+        })
+    }
+
+    unsafe fn enable_reset(&self) -> Result<(), EspError> {
         let gpio_cfg = gpio_config_t {
             pin_bit_mask: 1u64 << self.xshutdn_pin,
             mode: gpio_mode_t_GPIO_MODE_OUTPUT,
@@ -43,9 +60,14 @@ impl CameraInterface {
         };
         esp!(gpio_config(&gpio_cfg))?;
         gpio_set_level(self.xshutdn_pin as gpio_num_t, 0);
-        std::thread::sleep(Duration::from_millis(500)); // 500ms: ensures SDA is released after warm resets
+        std::thread::sleep(Duration::from_millis(500));
+        Ok(())
+    }
 
-        // 2. LP I2C bus (LP_I2C_NUM_0=2, LP_GPIO9 SCL / LP_GPIO11 SDA, 100 kHz)
+    unsafe fn set_up_i2c(
+        &self,
+        sensor: &CameraSensor,
+    ) -> Result<(i2c_master_bus_handle_t, i2c_master_dev_handle_t), EspError> {
         let mut i2c_bus_cfg: i2c_master_bus_config_t = core::mem::zeroed();
         i2c_bus_cfg.i2c_port = i2c_port_t_LP_I2C_NUM_0 as i32;
         i2c_bus_cfg.sda_io_num = self.sda_pin as gpio_num_t;
@@ -62,15 +84,21 @@ impl CameraInterface {
         i2c_dev_cfg.scl_speed_hz = 100_000;
         i2c_dev_cfg.scl_wait_us = 50_000;
         let mut i2c_dev: i2c_master_dev_handle_t = core::ptr::null_mut();
-        esp!(i2c_master_bus_add_device(i2c_bus, &i2c_dev_cfg, &mut i2c_dev))?;
+        esp!(i2c_master_bus_add_device(
+            i2c_bus,
+            &i2c_dev_cfg,
+            &mut i2c_dev
+        ))?;
 
-        // 3. Release reset; give the sensor 300 ms to bring its I2C interface up,
-        //    then retry bus recovery until the stuck SDA/SCL lines are clear.
+        Ok((i2c_bus, i2c_dev))
+    }
+
+    unsafe fn disable_reset(&self, i2c_bus: &mut i2c_master_bus_handle_t) -> Result<(), EspError> {
         gpio_set_level(self.xshutdn_pin as gpio_num_t, 1);
         std::thread::sleep(Duration::from_millis(300));
         let mut bus_ok = false;
         for attempt in 0..5u8 {
-            if i2c_master_bus_reset(i2c_bus) == ESP_OK as i32 {
+            if i2c_master_bus_reset(*i2c_bus) == ESP_OK {
                 bus_ok = true;
                 break;
             }
@@ -83,17 +111,24 @@ impl CameraInterface {
             );
         }
 
-        // 4. Program sensor registers
-        sensor.init(i2c_dev);
+        Ok(())
+    }
 
-        // 5. Power MIPI CSI-2 PHY
+    unsafe fn enable_power(&self) -> Result<esp_ldo_channel_handle_t, EspError> {
         let mut ldo_cfg: esp_ldo_channel_config_t = core::mem::zeroed();
         ldo_cfg.chan_id = self.ldo_channel;
         ldo_cfg.voltage_mv = self.ldo_voltage_mv;
         let mut ldo_chan: esp_ldo_channel_handle_t = core::ptr::null_mut();
         esp!(esp_ldo_acquire_channel(&ldo_cfg, &mut ldo_chan))?;
 
-        // 6. CSI controller: RAW10 pass-through
+        Ok(ldo_chan)
+    }
+
+    unsafe fn set_up_controller(
+        &self,
+        sensor: &CameraSensor,
+        capture: &CaptureBuffer,
+    ) -> Result<esp_cam_ctlr_handle_t, EspError> {
         let mut csi_cfg: esp_cam_ctlr_csi_config_t = core::mem::zeroed();
         csi_cfg.ctlr_id = 0;
         csi_cfg.h_res = sensor.resolution.0 as u32;
@@ -119,7 +154,13 @@ impl CameraInterface {
         esp!(esp_cam_ctlr_enable(csi))?;
         esp!(esp_cam_ctlr_start(csi))?;
 
-        // 7. ISP processor: create with placeholder colors then patch for RAW10 bypass
+        Ok(csi)
+    }
+
+    unsafe fn set_up_signal_processor(
+        &self,
+        sensor: &CameraSensor,
+    ) -> Result<isp_proc_handle_t, EspError> {
         let mut isp_cfg: esp_isp_processor_cfg_t = core::mem::zeroed();
         isp_cfg.clk_hz = 80_000_000;
         isp_cfg.input_data_source = isp_input_data_source_t_ISP_INPUT_DATA_SOURCE_CSI;
@@ -132,7 +173,7 @@ impl CameraInterface {
         esp!(esp_isp_new_processor(&isp_cfg, &mut isp))?;
         isp_bypass_raw10_patch(sensor.resolution.0 as u32, sensor.resolution.1 as u32);
 
-        Ok(InnerCamera { csi, isp, i2c_dev, i2c_bus, ldo_chan })
+        Ok(isp)
     }
 }
 
