@@ -36,17 +36,11 @@ impl CameraInterface {
         let (mut i2c_bus, i2c_dev) = self.set_up_i2c(sensor)?;
         self.disable_reset(&mut i2c_bus)?;
         sensor.init(i2c_dev);
-        let ldo_chan = self.enable_power()?;
+        self.enable_power()?;
         let csi = self.set_up_controller(sensor, capture)?;
-        let isp = self.set_up_signal_processor(sensor)?;
+        self.set_up_signal_processor(sensor)?;
 
-        Ok(InnerCamera {
-            csi,
-            isp,
-            i2c_dev,
-            i2c_bus,
-            ldo_chan,
-        })
+        Ok(InnerCamera { csi, i2c_dev })
     }
 
     unsafe fn enable_reset(&self) -> Result<(), EspError> {
@@ -114,14 +108,14 @@ impl CameraInterface {
         Ok(())
     }
 
-    unsafe fn enable_power(&self) -> Result<esp_ldo_channel_handle_t, EspError> {
+    unsafe fn enable_power(&self) -> Result<(), EspError> {
         let mut ldo_cfg: esp_ldo_channel_config_t = core::mem::zeroed();
         ldo_cfg.chan_id = self.ldo_channel;
         ldo_cfg.voltage_mv = self.ldo_voltage_mv;
         let mut ldo_chan: esp_ldo_channel_handle_t = core::ptr::null_mut();
         esp!(esp_ldo_acquire_channel(&ldo_cfg, &mut ldo_chan))?;
 
-        Ok(ldo_chan)
+        Ok(())
     }
 
     unsafe fn set_up_controller(
@@ -157,10 +151,7 @@ impl CameraInterface {
         Ok(csi)
     }
 
-    unsafe fn set_up_signal_processor(
-        &self,
-        sensor: &CameraSensor,
-    ) -> Result<isp_proc_handle_t, EspError> {
+    unsafe fn set_up_signal_processor(&self, sensor: &CameraSensor) -> Result<(), EspError> {
         let mut isp_cfg: esp_isp_processor_cfg_t = core::mem::zeroed();
         isp_cfg.clk_hz = 80_000_000;
         isp_cfg.input_data_source = isp_input_data_source_t_ISP_INPUT_DATA_SOURCE_CSI;
@@ -173,7 +164,7 @@ impl CameraInterface {
         esp!(esp_isp_new_processor(&isp_cfg, &mut isp))?;
         isp_bypass_raw10_patch(sensor.resolution.0 as u32, sensor.resolution.1 as u32);
 
-        Ok(isp)
+        Ok(())
     }
 }
 

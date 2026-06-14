@@ -54,10 +54,7 @@ unsafe extern "C" fn on_trans_finished(
 
 struct InnerCamera {
     csi: esp_cam_ctlr_handle_t,
-    isp: isp_proc_handle_t,
     i2c_dev: i2c_master_dev_handle_t,
-    i2c_bus: i2c_master_bus_handle_t,
-    ldo_chan: esp_ldo_channel_handle_t,
 }
 
 impl InnerCamera {
@@ -74,8 +71,8 @@ const OUTPUT_HEIGHT: usize = sstv::Mode::Robot36.image_height() as usize;
 
 pub struct Camera {
     sensor: CameraSensor,
-    _inner: InnerCamera,
     capture_buffer: Box<CaptureBuffer>,
+    _inner: InnerCamera,
 }
 
 impl Camera {
