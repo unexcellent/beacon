@@ -155,12 +155,14 @@ impl AudioChannel {
 
         unsafe { esp!(i2s_channel_init_std_mode(tx, &std_cfg))? };
 
-        Ok(Self {
+        let channel = Self {
             inner: tx,
             left_channel: encoder.left_channel,
             buf: vec![0u8; interface.chunk_size * 4],
             buf_pos: 0,
-        })
+        };
+        channel.enable()?;
+        Ok(channel)
     }
 
     /// Packs a mono 16-bit sample into the stereo I2S frame and writes to DMA when the
@@ -199,24 +201,22 @@ impl AudioChannel {
         Ok(())
     }
 
-    /// Flushes any buffered samples, then disables the channel.
-    pub fn disable(&mut self) {
+    fn disable(&mut self) {
         let _ = self.flush();
         unsafe {
             let _ = i2s_channel_disable(self.inner);
         }
     }
 
-    /// Enables the channel, starting the I2S clocks and allowing transmission.
-    pub fn enable(&mut self) -> Result<(), EspError> {
+    fn enable(&self) -> Result<(), EspError> {
         unsafe { esp!(i2s_channel_enable(self.inner)) }
     }
 }
 
 impl Drop for AudioChannel {
     fn drop(&mut self) {
+        self.disable();
         unsafe {
-            let _ = i2s_channel_disable(self.inner);
             let _ = i2s_del_channel(self.inner);
         }
     }

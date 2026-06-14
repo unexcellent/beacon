@@ -44,16 +44,12 @@ fn transmit_sstv(
     audio: &mut AudioChannel,
     debug: &DebugChannel,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    audio.enable()?;
-
     debug.log("Starting SSTV transmission...");
     let encoder = Encoder::new(Mode::Robot36, image)?;
     for sample in Synthesizer::new(encoder, PHILLIPS_I2S.sample_rate) {
         audio.transmit(sample)?;
     }
     debug.log("SSTV transmission complete.");
-
-    audio.disable();
 
     Ok(())
 }
