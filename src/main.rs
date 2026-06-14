@@ -5,7 +5,9 @@ mod camera;
 
 use std::io::Write;
 
+use audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
 use esp_idf_sys::*;
+use sstv::{Encoder, Mode, RgbPixel, Synthesizer};
 
 unsafe extern "C" {
     // ESP_LINE_ENDINGS_LF = 2: pass LF bytes through unchanged (no CRLF expansion).
@@ -33,42 +35,73 @@ unsafe fn send_frame(data: &[u8], w: usize, h: usize) {
     let _ = out.flush();
 }
 
+fn transmit_sstv(channel: &mut AudioChannel, rgb: &[u8]) {
+    log::info!("SSTV transmission start");
+
+    let pixels: Vec<RgbPixel> = rgb
+        .chunks_exact(3)
+        .map(|p| RgbPixel::new(p[0], p[1], p[2]))
+        .collect();
+
+    let encoder = Encoder::new(Mode::Robot36, pixels.into_iter()).unwrap();
+
+    let mut buf = [0u8; PHILLIPS_I2S.chunk_size * 4];
+    let mut buf_pos = 0usize;
+
+    for sample in Synthesizer::new(encoder, PHILLIPS_I2S.sample_rate) {
+        let [lo, hi] = sample.to_le_bytes();
+
+        let (audio_off, silent_off) = if PCM5102A.left_channel {
+            (0, 2)
+        } else {
+            (2, 0)
+        };
+        buf[buf_pos + audio_off] = lo;
+        buf[buf_pos + audio_off + 1] = hi;
+        buf[buf_pos + silent_off] = 0;
+        buf[buf_pos + silent_off + 1] = 0;
+        buf_pos += 4;
+
+        if buf_pos == buf.len() {
+            channel.transmit(&buf).unwrap();
+            buf_pos = 0;
+        }
+    }
+
+    if buf_pos > 0 {
+        channel.transmit(&buf[..buf_pos]).unwrap();
+    }
+
+    log::info!("SSTV transmission complete (~36 s Robot36 frame)");
+}
+
 fn main() {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
-    log::info!("MIPI-CSI frame capture starting");
-    unsafe { camera_capture_loop() }
+    log::info!("MIPI-CSI capture + UART + SSTV beacon starting");
+    unsafe { run() }
 }
 
-unsafe fn camera_capture_loop() -> ! {
-    // ESP_LINE_ENDINGS_LF = 2: disable the VFS LF→CRLF expansion so pixel bytes
-    // (including any 0x0A values) pass through to the host without insertion.
+unsafe fn run() -> ! {
     usb_serial_jtag_vfs_set_tx_line_endings(2);
 
     let mut camera = camera::Camera::new(camera::SC850SL, camera::MIPI).unwrap();
+    let mut channel = AudioChannel::new(PCM5102A, PHILLIPS_I2S).unwrap();
 
-    // Output buffer in PSRAM for assembling RGB888 bytes before USB transmission.
     let out_bytes = 320 * 240 * 3;
     let out_ptr = heap_caps_malloc(out_bytes, MALLOC_CAP_SPIRAM) as *mut u8;
     assert!(!out_ptr.is_null(), "output buffer allocation failed");
     let out_buf = core::slice::from_raw_parts_mut(out_ptr, out_bytes);
 
-    // Skip the first AWB_WARMUP_FRAMES so the IIR AWB can settle before
-    // any frame is transmitted; the seeded WB_R/WB_B values mean only a handful
-    // of frames are needed to reach a stable colour balance.
-    const AWB_WARMUP_FRAMES: u32 = 0; // left at 0 for testing purposes. should be restored when compiling for prod
+    const AWB_WARMUP_FRAMES: u32 = 3; // left at 0 for testing purposes. should be restored when compiling for prod
     let mut frame_count: u32 = 0;
 
     loop {
-        let t0 = std::time::Instant::now();
-
         for (i, pixel) in camera.capture().enumerate() {
-            out_buf[i * 3]     = pixel.red();
+            out_buf[i * 3] = pixel.red();
             out_buf[i * 3 + 1] = pixel.green();
             out_buf[i * 3 + 2] = pixel.blue();
         }
-
-        let t_isp = t0.elapsed();
 
         frame_count += 1;
         if frame_count <= AWB_WARMUP_FRAMES {
@@ -86,16 +119,15 @@ unsafe fn camera_capture_loop() -> ! {
         send_frame(out_buf, 320, 240);
 
         let (wb_r, wb_b) = camera::current_wb_gains();
-        log::info!(
-            "frame sent: isp={}ms total={}ms wb_r={:.2} wb_b={:.2}",
-            t_isp.as_millis(),
-            t0.elapsed().as_millis(),
-            wb_r,
-            wb_b,
-        );
+        log::info!("frame sent via UART: wb_r={:.2} wb_b={:.2}", wb_r, wb_b);
 
+        channel.enable().unwrap();
+        transmit_sstv(&mut channel, out_buf);
+        channel.disable();
+
+        log::info!("Done. Sleeping.");
         loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            std::thread::sleep(std::time::Duration::from_secs(u64::MAX));
         }
     }
 }
