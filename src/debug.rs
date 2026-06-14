@@ -9,15 +9,23 @@ unsafe extern "C" {
 // Magic header recognised by local/receive_frame.py
 const FRAME_MAGIC: [u8; 4] = [0xFF, 0xFE, 0xFD, 0xFC];
 
-pub struct UartChannel;
+pub struct DebugChannel;
 
-impl UartChannel {
+impl DebugChannel {
     pub fn new() -> Self {
         // ESP_LINE_ENDINGS_LF = 2: pass LF bytes through unchanged (no CRLF expansion).
         // Critical for binary frame data — every 0x0A pixel byte would otherwise become
         // 0x0D 0x0A, inserting bytes and corrupting the stream on the host side.
         unsafe { usb_serial_jtag_vfs_set_tx_line_endings(2) };
         Self
+    }
+
+    pub fn log(&self, msg: &str) {
+        log::info!("{msg}");
+    }
+
+    pub fn error(&self, msg: &str) {
+        log::error!("{msg}");
     }
 
     // Emit a frame over USB-JTAG serial in the format expected by receive_frame.py:
