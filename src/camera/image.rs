@@ -172,6 +172,10 @@ impl Iterator for Image {
         self.fg += lg as u64;
         self.fb += lb as u64;
 
+        if super::watermark::is_white_at(dx, dy) {
+            return Some(RgbPixel::new(255, 255, 255));
+        }
+
         let (wr, wb) = self.apply_white_balance(lr, lb);
         Some(RgbPixel::new(
             unsafe { Self::apply_gamma(wr) },
