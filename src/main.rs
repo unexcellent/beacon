@@ -7,6 +7,8 @@ use camera::{Camera, MIPI, SC850SL};
 use debug::DebugChannel;
 use sstv::{Encoder, Mode, Synthesizer};
 
+use crate::camera::Image;
+
 fn main() -> ! {
     init_esp32();
     let debug = DebugChannel::new();
@@ -26,30 +28,38 @@ fn init_esp32() {
 
 fn run(debug: &DebugChannel) -> Result<(), Box<dyn std::error::Error>> {
     let mut camera = Camera::new(SC850SL, MIPI)?;
-    let mut channel = AudioChannel::new(PCM5102A, PHILLIPS_I2S)?;
+    let mut audio = AudioChannel::new(PCM5102A, PHILLIPS_I2S)?;
 
     camera.calibrate(3);
-
     let image = camera.capture();
 
     debug.send_image(image.clone())?;
+    transmit_sstv(image, &mut audio, debug)?;
 
-    channel.enable()?;
+    Ok(())
+}
+
+fn transmit_sstv(
+    image: Image,
+    audio: &mut AudioChannel,
+    debug: &DebugChannel,
+) -> Result<(), Box<dyn std::error::Error>> {
+    audio.enable()?;
 
     debug.log("Starting SSTV transmission...");
     let encoder = Encoder::new(Mode::Robot36, image)?;
     for sample in Synthesizer::new(encoder, PHILLIPS_I2S.sample_rate) {
-        channel.transmit(sample)?;
+        audio.transmit(sample)?;
     }
     debug.log("SSTV transmission complete.");
 
-    channel.disable();
+    audio.disable();
 
     Ok(())
 }
 
 fn sleep_forever(debug: &DebugChannel) -> ! {
-    debug.log("Going to sleep. Good night!");
+    debug.log("Going to sleep. Good night.");
     loop {
         std::thread::sleep(std::time::Duration::from_secs(u64::MAX));
     }
