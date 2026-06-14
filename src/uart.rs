@@ -22,7 +22,7 @@ impl UartChannel {
 
     // Emit a frame over USB-JTAG serial in the format expected by receive_frame.py:
     //   [0xFF 0xFE 0xFD 0xFC] [w u16-LE] [h u16-LE] [byte_len u32-LE] [RGB888 pixels]
-    pub fn send_image(&self, image: Image) {
+    pub fn send_image(&self, image: Image) -> std::io::Result<()> {
         let w = image.width();
         let h = image.height();
         let byte_len = (w * h * 3) as u32;
@@ -36,8 +36,8 @@ impl UartChannel {
         let data: Vec<u8> = image.flat_map(|p| [p.red(), p.green(), p.blue()]).collect();
 
         let mut out = std::io::stdout();
-        let _ = out.write_all(&header);
-        let _ = out.write_all(&data);
-        let _ = out.flush();
+        out.write_all(&header)?;
+        out.write_all(&data)?;
+        out.flush()
     }
 }
