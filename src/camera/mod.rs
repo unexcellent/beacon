@@ -122,10 +122,8 @@ impl Camera {
         unsafe {
             Image::new(
                 self.capture_buffer.buf as *const u8,
-                self.sensor.resolution.0,
-                self.sensor.resolution.1,
+                &self.sensor,
                 self.capture_buffer.row_bytes(),
-                self.sensor.black_level,
                 self.wb_r,
                 self.wb_b,
             )

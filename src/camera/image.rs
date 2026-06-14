@@ -1,6 +1,8 @@
 use esp_idf_sys::vTaskDelay;
 use sstv::RgbPixel;
 
+use crate::camera::CameraSensor;
+
 use super::{OUTPUT_HEIGHT, OUTPUT_WIDTH};
 
 #[derive(Clone)]
@@ -15,28 +17,32 @@ pub struct Image {
 impl Image {
     pub(super) unsafe fn new(
         src: *const u8,
-        src_width: usize,
-        src_height: usize,
+        sensor: &CameraSensor,
         row_bytes: usize,
-        black_level: u8,
         wb_r: f32,
         wb_b: f32,
     ) -> Self {
-        let bl = black_level as f32;
+        let bl = sensor.black_level as f32;
         let bl_scale = 255.0 / (255.0 - bl).max(1.0);
 
         let mut pixels = Vec::with_capacity(OUTPUT_WIDTH * OUTPUT_HEIGHT);
-        let mut fr = 0u64;
-        let mut fg = 0u64;
-        let mut fb = 0u64;
+        let mut fr: u64 = 0;
+        let mut fg: u64 = 0;
+        let mut fb: u64 = 0;
 
         for dy in 0..OUTPUT_HEIGHT {
             if dy % 40 == 0 {
                 vTaskDelay(1);
             }
             for dx in 0..OUTPUT_WIDTH {
-                let (ar, ag, ab) =
-                    sample_bayer_region(src, src_width, src_height, row_bytes, dx, dy);
+                let (ar, ag, ab) = sample_bayer_region(
+                    src,
+                    sensor.resolution.0,
+                    sensor.resolution.1,
+                    row_bytes,
+                    dx,
+                    dy,
+                );
                 let lr = ((ar - bl) * bl_scale).max(0.0);
                 let lg = ((ag - bl) * bl_scale).max(0.0);
                 let lb = ((ab - bl) * bl_scale).max(0.0);
