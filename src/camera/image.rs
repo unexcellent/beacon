@@ -3,40 +3,6 @@ use sstv::RgbPixel;
 
 use super::{OUTPUT_HEIGHT, OUTPUT_WIDTH};
 
-static mut WB_R: f32 = 0.0;
-static mut WB_B: f32 = 0.0;
-static mut GAMMA_LUT: [u8; 256] = [0u8; 256];
-
-pub(super) unsafe fn init(wb_r_seed: f32, wb_b_seed: f32) {
-    WB_R = wb_r_seed;
-    WB_B = wb_b_seed;
-    init_gamma();
-}
-
-unsafe fn init_gamma() {
-    for i in 0..256usize {
-        let c = (i as f32 / 255.0).powf(1.0 / 2.2);
-        let v = (c * 255.0 + 0.5) as u32;
-        GAMMA_LUT[i] = if v > 255 { 255 } else { v as u8 };
-    }
-}
-
-pub unsafe fn current_wb_gains() -> (f32, f32) {
-    (*core::ptr::addr_of!(WB_R), *core::ptr::addr_of!(WB_B))
-}
-
-unsafe fn gamma_lookup(v: usize) -> u8 {
-    GAMMA_LUT[v]
-}
-
-unsafe fn update_wb(fr: u64, fg: u64, fb: u64) {
-    if fr > 0 && fg > 0 && fb > 0 {
-        let gr = (fg as f32 / fr as f32).clamp(0.5, 4.0);
-        let gb = (fg as f32 / fb as f32).clamp(0.5, 4.0);
-        WB_R = WB_R * 0.5 + gr * 0.5;
-        WB_B = WB_B * 0.5 + gb * 0.5;
-    }
-}
 
 #[derive(Clone)]
 pub struct Image {
@@ -61,8 +27,9 @@ impl Image {
         src_height: usize,
         row_bytes: usize,
         black_level: u8,
+        wb_r: f32,
+        wb_b: f32,
     ) -> Self {
-        let (wb_r, wb_b) = current_wb_gains();
         let bl = black_level as f32;
         let bl_scale = 255.0 / (255.0 - bl).max(1.0);
         Self {
@@ -83,6 +50,11 @@ impl Image {
 
     pub fn width(&self) -> usize { OUTPUT_WIDTH }
     pub fn height(&self) -> usize { OUTPUT_HEIGHT }
+
+    pub(super) fn channel_sums(mut self) -> (u64, u64, u64) {
+        while self.next().is_some() {}
+        (self.fr, self.fg, self.fb)
+    }
 
     // Read the 8 MSBs of the x-th pixel from a packed RAW10 row.
     // Layout: 4 pixels per 5-byte group — bytes 0-3 hold each pixel's top 8 bits,
@@ -142,8 +114,8 @@ impl Image {
         (r * self.wb_r, b * self.wb_b)
     }
 
-    unsafe fn apply_gamma(v: f32) -> u8 {
-        gamma_lookup(((v + 0.5) as i32).clamp(0, 255) as usize)
+    fn apply_gamma(v: f32) -> u8 {
+        ((v / 255.0).powf(1.0 / 2.2) * 255.0 + 0.5) as u8
     }
 }
 
@@ -178,15 +150,9 @@ impl Iterator for Image {
 
         let (wr, wb) = self.apply_white_balance(lr, lb);
         Some(RgbPixel::new(
-            unsafe { Self::apply_gamma(wr) },
-            unsafe { Self::apply_gamma(lg) },
-            unsafe { Self::apply_gamma(wb) },
+            Self::apply_gamma(wr),
+            Self::apply_gamma(lg),
+            Self::apply_gamma(wb),
         ))
-    }
-}
-
-impl Drop for Image {
-    fn drop(&mut self) {
-        unsafe { update_wb(self.fr, self.fg, self.fb) };
     }
 }

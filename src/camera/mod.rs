@@ -74,6 +74,8 @@ pub struct Camera {
     sensor: CameraSensor,
     capture_buffer: Box<CaptureBuffer>,
     _inner: InnerCamera,
+    wb_r: f32,
+    wb_b: f32,
 }
 
 impl Camera {
@@ -86,20 +88,29 @@ impl Camera {
 
             sensor.enable(inner.i2c_dev);
 
-            image::init(sensor.red_gain_seed, sensor.blue_gain_seed);
-
-            Ok(Self {
+            let mut cam = Self {
+                wb_r: sensor.red_gain_seed,
+                wb_b: sensor.blue_gain_seed,
                 sensor,
                 _inner: inner,
                 capture_buffer,
-            })
+            };
+
+            cam.calibrate(3);
+
+            Ok(cam)
         }
     }
 
-    /// Capture a preset number of frames in order to calibrate the camera.
     pub fn calibrate(&mut self, frames: u32) {
         for _ in 0..frames {
-            self.capture();
+            let (fr, fg, fb) = self.capture().channel_sums();
+            if fr > 0 && fg > 0 && fb > 0 {
+                let gr = (fg as f32 / fr as f32).clamp(0.5, 4.0);
+                let gb = (fg as f32 / fb as f32).clamp(0.5, 4.0);
+                self.wb_r = self.wb_r * 0.5 + gr * 0.5;
+                self.wb_b = self.wb_b * 0.5 + gb * 0.5;
+            }
         }
     }
 
@@ -115,6 +126,8 @@ impl Camera {
                 self.sensor.resolution.1,
                 self.capture_buffer.row_bytes(),
                 self.sensor.black_level,
+                self.wb_r,
+                self.wb_b,
             )
         }
     }

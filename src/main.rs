@@ -30,7 +30,6 @@ fn run(debug: &DebugChannel) -> Result<(), Box<dyn std::error::Error>> {
     let mut camera = Camera::new(SC850SL, MIPI)?;
     let mut audio = AudioChannel::new(PCM5102A, PHILLIPS_I2S)?;
 
-    camera.calibrate(3);
     let image = camera.capture();
 
     debug.send_image(image.clone())?;
