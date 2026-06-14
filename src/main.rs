@@ -1,12 +1,9 @@
-#![allow(unsafe_op_in_unsafe_fn)]
-
 mod audio;
 mod camera;
 
 use std::io::Write;
 
 use audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
-use esp_idf_sys::*;
 use sstv::{Encoder, Mode, RgbPixel, Synthesizer};
 
 unsafe extern "C" {
@@ -21,7 +18,7 @@ const FRAME_MAGIC: [u8; 4] = [0xFF, 0xFE, 0xFD, 0xFC];
 
 // Emit a frame over USB-JTAG serial in the format expected by receive_frame.py:
 //   [0xFF 0xFE 0xFD 0xFC] [w u16-LE] [h u16-LE] [byte_len u32-LE] [RGB888 pixels]
-unsafe fn send_frame(data: &[u8], w: usize, h: usize) {
+fn send_frame(data: &[u8], w: usize, h: usize) {
     let byte_len = (w * h * 3) as u32;
     let mut header = [0u8; 12];
     header[0..4].copy_from_slice(&FRAME_MAGIC);
@@ -51,11 +48,7 @@ fn transmit_sstv(channel: &mut AudioChannel, rgb: &[u8]) {
     for sample in Synthesizer::new(encoder, PHILLIPS_I2S.sample_rate) {
         let [lo, hi] = sample.to_le_bytes();
 
-        let (audio_off, silent_off) = if PCM5102A.left_channel {
-            (0, 2)
-        } else {
-            (2, 0)
-        };
+        let (audio_off, silent_off) = if PCM5102A.left_channel { (0, 2) } else { (2, 0) };
         buf[buf_pos + audio_off] = lo;
         buf[buf_pos + audio_off + 1] = hi;
         buf[buf_pos + silent_off] = 0;
@@ -79,33 +72,29 @@ fn main() {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
     log::info!("MIPI-CSI capture + UART + SSTV beacon starting");
-    unsafe { run() }
-}
 
-unsafe fn run() -> ! {
-    usb_serial_jtag_vfs_set_tx_line_endings(2);
+    unsafe { usb_serial_jtag_vfs_set_tx_line_endings(2) };
 
-    let mut camera = camera::Camera::new(camera::SC850SL, camera::MIPI).unwrap();
+    let mut camera = unsafe { camera::Camera::new(camera::SC850SL, camera::MIPI) }.unwrap();
     let mut channel = AudioChannel::new(PCM5102A, PHILLIPS_I2S).unwrap();
 
-    let out_bytes = 320 * 240 * 3;
-    let out_ptr = heap_caps_malloc(out_bytes, MALLOC_CAP_SPIRAM) as *mut u8;
-    assert!(!out_ptr.is_null(), "output buffer allocation failed");
-    let out_buf = core::slice::from_raw_parts_mut(out_ptr, out_bytes);
+    // 230 KB — exceeds CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL (16 KB), so Vec goes to PSRAM.
+    let mut out_buf = vec![0u8; 320 * 240 * 3];
 
-    const AWB_WARMUP_FRAMES: u32 = 3; // left at 0 for testing purposes. should be restored when compiling for prod
+    const AWB_WARMUP_FRAMES: u32 = 3;
     let mut frame_count: u32 = 0;
 
     loop {
-        for (i, pixel) in camera.capture().enumerate() {
-            out_buf[i * 3] = pixel.red();
+        let image = unsafe { camera.capture() };
+        for (i, pixel) in image.enumerate() {
+            out_buf[i * 3]     = pixel.red();
             out_buf[i * 3 + 1] = pixel.green();
             out_buf[i * 3 + 2] = pixel.blue();
         }
 
         frame_count += 1;
         if frame_count <= AWB_WARMUP_FRAMES {
-            let (wb_r, wb_b) = camera::current_wb_gains();
+            let (wb_r, wb_b) = unsafe { camera::current_wb_gains() };
             log::info!(
                 "awb warmup {}/{}: wb_r={:.2} wb_b={:.2}",
                 frame_count,
@@ -116,13 +105,13 @@ unsafe fn run() -> ! {
             continue;
         }
 
-        send_frame(out_buf, 320, 240);
+        send_frame(&out_buf, 320, 240);
 
-        let (wb_r, wb_b) = camera::current_wb_gains();
+        let (wb_r, wb_b) = unsafe { camera::current_wb_gains() };
         log::info!("frame sent via UART: wb_r={:.2} wb_b={:.2}", wb_r, wb_b);
 
         channel.enable().unwrap();
-        transmit_sstv(&mut channel, out_buf);
+        transmit_sstv(&mut channel, &out_buf);
         channel.disable();
 
         log::info!("Done. Sleeping.");
