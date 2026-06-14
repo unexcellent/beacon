@@ -81,42 +81,22 @@ fn main() {
     // 230 KB — exceeds CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL (16 KB), so Vec goes to PSRAM.
     let mut out_buf = vec![0u8; 320 * 240 * 3];
 
-    const AWB_WARMUP_FRAMES: u32 = 3;
-    let mut frame_count: u32 = 0;
+    unsafe { camera.calibrate(3) };
 
+    for (i, pixel) in unsafe { camera.capture() }.enumerate() {
+        out_buf[i * 3]     = pixel.red();
+        out_buf[i * 3 + 1] = pixel.green();
+        out_buf[i * 3 + 2] = pixel.blue();
+    }
+
+    send_frame(&out_buf, 320, 240);
+
+    channel.enable().unwrap();
+    transmit_sstv(&mut channel, &out_buf);
+    channel.disable();
+
+    log::info!("Done. Sleeping.");
     loop {
-        let image = unsafe { camera.capture() };
-        for (i, pixel) in image.enumerate() {
-            out_buf[i * 3]     = pixel.red();
-            out_buf[i * 3 + 1] = pixel.green();
-            out_buf[i * 3 + 2] = pixel.blue();
-        }
-
-        frame_count += 1;
-        if frame_count <= AWB_WARMUP_FRAMES {
-            let (wb_r, wb_b) = unsafe { camera::current_wb_gains() };
-            log::info!(
-                "awb warmup {}/{}: wb_r={:.2} wb_b={:.2}",
-                frame_count,
-                AWB_WARMUP_FRAMES,
-                wb_r,
-                wb_b,
-            );
-            continue;
-        }
-
-        send_frame(&out_buf, 320, 240);
-
-        let (wb_r, wb_b) = unsafe { camera::current_wb_gains() };
-        log::info!("frame sent via UART: wb_r={:.2} wb_b={:.2}", wb_r, wb_b);
-
-        channel.enable().unwrap();
-        transmit_sstv(&mut channel, &out_buf);
-        channel.disable();
-
-        log::info!("Done. Sleeping.");
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(u64::MAX));
-        }
+        std::thread::sleep(std::time::Duration::from_secs(u64::MAX));
     }
 }

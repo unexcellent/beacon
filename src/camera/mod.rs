@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use esp_idf_sys::*;
 
-pub use image::{current_wb_gains, Image};
+pub use image::Image;
 pub use interface::{CameraInterface, MIPI};
 pub use sensor::{CameraSensor, SC850SL};
 
@@ -100,6 +100,13 @@ impl Camera {
             _inner: inner,
             capture_buffer,
         })
+    }
+
+    /// Capture a preset number of frames in order to calibrate the camera.
+    pub unsafe fn calibrate(&mut self, frames: u32) {
+        for _ in 0..frames {
+            for _ in self.capture() {}
+        }
     }
 
     pub unsafe fn capture(&mut self) -> Image {
