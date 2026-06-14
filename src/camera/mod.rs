@@ -79,48 +79,46 @@ pub struct Camera {
 }
 
 impl Camera {
-    pub unsafe fn new(sensor: CameraSensor, interface: CameraInterface) -> Result<Self, EspError> {
-        let capture_buffer = Self::allocate_capture_buffer(&sensor);
+    pub fn new(sensor: CameraSensor, interface: CameraInterface) -> Result<Self, EspError> {
+        unsafe {
+            let capture_buffer = Self::allocate_capture_buffer(&sensor);
 
-        let inner = interface.init(&sensor, &capture_buffer)?;
-        inner.queue_receive(&capture_buffer)?;
+            let inner = interface.init(&sensor, &capture_buffer)?;
+            inner.queue_receive(&capture_buffer)?;
 
-        sensor.enable(inner.i2c_dev);
+            sensor.enable(inner.i2c_dev);
 
-        image::init(sensor.red_gain_seed, sensor.blue_gain_seed);
+            image::init(sensor.red_gain_seed, sensor.blue_gain_seed);
 
-        log::info!(
-            "camera streaming — capturing {} x {}",
-            sensor.resolution.0,
-            sensor.resolution.1,
-        );
-
-        Ok(Self {
-            sensor,
-            _inner: inner,
-            capture_buffer,
-        })
-    }
-
-    /// Capture a preset number of frames in order to calibrate the camera.
-    pub unsafe fn calibrate(&mut self, frames: u32) {
-        for _ in 0..frames {
-            for _ in self.capture() {}
+            Ok(Self {
+                sensor,
+                _inner: inner,
+                capture_buffer,
+            })
         }
     }
 
-    pub unsafe fn capture(&mut self) -> Image {
+    /// Capture a preset number of frames in order to calibrate the camera.
+    pub fn calibrate(&mut self, frames: u32) {
+        for _ in 0..frames {
+            self.capture();
+        }
+    }
+
+    pub fn capture(&mut self) -> Image {
         while !FRAME_READY.swap(false, Ordering::AcqRel) {
             std::thread::sleep(Duration::from_millis(1));
         }
 
-        Image::new(
-            self.capture_buffer.buf as *const u8,
-            self.sensor.resolution.0,
-            self.sensor.resolution.1,
-            self.capture_buffer.row_bytes(),
-            self.sensor.black_level,
-        )
+        unsafe {
+            Image::new(
+                self.capture_buffer.buf as *const u8,
+                self.sensor.resolution.0,
+                self.sensor.resolution.1,
+                self.capture_buffer.row_bytes(),
+                self.sensor.black_level,
+            )
+        }
     }
 
     unsafe fn allocate_capture_buffer(sensor: &CameraSensor) -> Box<CaptureBuffer> {

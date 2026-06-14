@@ -3,6 +3,7 @@ mod camera;
 mod debug;
 
 use audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
+use camera::{Camera, MIPI, SC850SL};
 use debug::DebugChannel;
 use sstv::{Encoder, Mode, Synthesizer};
 
@@ -24,12 +25,12 @@ fn init_esp32() {
 }
 
 fn run(debug: &DebugChannel) -> Result<(), Box<dyn std::error::Error>> {
-    let mut camera = unsafe { camera::Camera::new(camera::SC850SL, camera::MIPI) }?;
+    let mut camera = Camera::new(SC850SL, MIPI)?;
     let mut channel = AudioChannel::new(PCM5102A, PHILLIPS_I2S)?;
 
-    unsafe { camera.calibrate(3) };
+    camera.calibrate(3);
 
-    let image = unsafe { camera.capture() };
+    let image = camera.capture();
 
     debug.send_image(image.clone())?;
 
