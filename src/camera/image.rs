@@ -38,6 +38,7 @@ unsafe fn update_wb(fr: u64, fg: u64, fb: u64) {
     }
 }
 
+#[derive(Clone)]
 pub struct Image {
     src: *const u8,
     src_width: usize,
@@ -79,6 +80,9 @@ impl Image {
             fb: 0,
         }
     }
+
+    pub fn width(&self) -> usize { OUTPUT_WIDTH }
+    pub fn height(&self) -> usize { OUTPUT_HEIGHT }
 
     // Read the 8 MSBs of the x-th pixel from a packed RAW10 row.
     // Layout: 4 pixels per 5-byte group — bytes 0-3 hold each pixel's top 8 bits,
