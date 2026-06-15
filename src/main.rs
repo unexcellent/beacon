@@ -1,18 +1,14 @@
-use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
+mod csp;
+mod kiss;
+mod ota;
+
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use esp_idf_sys::{
-    esp,
-    esp_timer_get_time,
-    gpio_config,
-    gpio_config_t,
-    gpio_get_level,
-    gpio_install_isr_service,
-    gpio_int_type_t_GPIO_INTR_ANYEDGE as GPIO_INTR_ANYEDGE,
-    gpio_isr_handler_add,
-    gpio_mode_t_GPIO_MODE_INPUT as GPIO_INPUT,
-    gpio_mode_t_GPIO_MODE_OUTPUT as GPIO_OUTPUT,
-    gpio_set_level,
-    vTaskDelay,
+    esp, esp_timer_get_time, gpio_config, gpio_config_t, gpio_get_level, gpio_install_isr_service,
+    gpio_int_type_t_GPIO_INTR_ANYEDGE as GPIO_INTR_ANYEDGE, gpio_isr_handler_add,
+    gpio_mode_t_GPIO_MODE_INPUT as GPIO_INPUT, gpio_mode_t_GPIO_MODE_OUTPUT as GPIO_OUTPUT,
+    gpio_set_level, vTaskDelay,
 };
 
 const RX_PIN: i32 = 37;
@@ -39,7 +35,6 @@ unsafe extern "C" fn on_edge(_arg: *mut core::ffi::c_void) {
     let level = unsafe { gpio_get_level(RX_PIN) } as u8;
     let wr = RING_WR.load(Ordering::Relaxed);
     let next_wr = (wr + 1) & RING_MASK;
-    // Drop edge if buffer is full
     if next_wr != RING_RD.load(Ordering::Relaxed) {
         RING_TS[wr].store(now, Ordering::Relaxed);
         RING_LVL[wr].store(level, Ordering::Relaxed);
@@ -47,10 +42,6 @@ unsafe extern "C" fn on_edge(_arg: *mut core::ffi::c_void) {
     }
 }
 
-/// Software UART decoder (8N1, idle-high).
-///
-/// Reconstructs bytes from edge timestamps by counting how many bit periods
-/// elapsed at each level between successive edges.
 struct Decoder {
     framing: bool,
     start_us: u32,
@@ -83,7 +74,6 @@ impl Decoder {
         let n = ((delta + BIT_PERIOD_US / 2) / BIT_PERIOD_US).max(1) as u8;
         let decoded = self.consume_bits(self.last_level, n);
         if !self.framing && level == 0 {
-            // Stop bit ended and next start bit arrived simultaneously
             self.begin_frame(ts);
         } else if self.framing {
             self.last_edge_us = ts;
@@ -92,7 +82,6 @@ impl Decoder {
         decoded
     }
 
-    /// Force-flush a partial frame if no edge has arrived for >12 bit periods.
     fn check_timeout(&mut self, now: u32) -> Option<u8> {
         if !self.framing {
             return None;
@@ -117,9 +106,6 @@ impl Decoder {
         self.data = 0;
     }
 
-    /// Push `n` bits at `level` into the frame, starting at `bit_pos`.
-    ///
-    /// Bit layout: 0=start, 1–8=data LSB-first, 9=stop.
     fn consume_bits(&mut self, level: u8, n: u8) -> Option<u8> {
         for _ in 0..n {
             match self.bit_pos {
@@ -139,7 +125,7 @@ impl Decoder {
                     if level == 1 {
                         return Some(self.data);
                     }
-                    return None; // framing error: missing stop bit
+                    return None;
                 }
                 _ => {
                     self.framing = false;
@@ -149,6 +135,33 @@ impl Decoder {
             self.bit_pos += 1;
         }
         None
+    }
+}
+
+fn handle_csp_frame(frame: &[u8], ota: &mut ota::OtaState) {
+    match csp::CspHeader::parse(frame) {
+        Some((h, payload)) => {
+            log::info!("amogus");
+            log::info!(
+                "CSP prio={} src={} dst={} dport={} sport={} flags=0x{:02x} payload({} bytes)",
+                h.priority,
+                h.src,
+                h.dst,
+                h.dport,
+                h.sport,
+                h.flags,
+                payload.len(),
+            );
+            if h.dport == 10 {
+                ota.handle(payload);
+            }
+        }
+        None => {
+            log::warn!(
+                "KISS frame too short for CSP header ({} bytes)",
+                frame.len()
+            );
+        }
     }
 }
 
@@ -194,10 +207,10 @@ fn main() {
     );
 
     let mut dec = Decoder::new();
-    let mut buf: Vec<u8> = Vec::new();
+    let mut kiss = kiss::KissDecoder::new();
+    let mut ota = ota::OtaState::new();
 
     loop {
-        // Drain the ring buffer
         loop {
             let rd = RING_RD.load(Ordering::Relaxed);
             let wr = RING_WR.load(Ordering::Acquire);
@@ -208,23 +221,17 @@ fn main() {
             let lvl = RING_LVL[rd].load(Ordering::Relaxed);
             RING_RD.store((rd + 1) & RING_MASK, Ordering::Relaxed);
             if let Some(b) = dec.on_edge(ts, lvl) {
-                buf.push(b);
+                if let Some(frame) = kiss.push(b) {
+                    handle_csp_frame(&frame, &mut ota);
+                }
             }
         }
 
-        // Flush stop bit when no trailing edge arrives
         let now = unsafe { esp_timer_get_time() as u32 };
         if let Some(b) = dec.check_timeout(now) {
-            buf.push(b);
-        }
-
-        // Print once the line goes idle
-        if !dec.framing && !buf.is_empty() {
-            match core::str::from_utf8(&buf) {
-                Ok(s) => log::info!("RX: {:?}", s),
-                Err(_) => log::info!("RX: {:02x?}", buf),
+            if let Some(frame) = kiss.push(b) {
+                handle_csp_frame(&frame, &mut ota);
             }
-            buf.clear();
         }
 
         unsafe { vTaskDelay(1) };

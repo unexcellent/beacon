@@ -3,7 +3,7 @@ target = "riscv32imafc-esp-espidf"
 
 [target.riscv32imafc-esp-espidf]
 linker = "ldproxy"
-runner = "espflash flash --monitor"
+runner = "local/flash.sh"
 rustflags = [
     "--cfg", "espidf_time64",
 ]
