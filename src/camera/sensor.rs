@@ -19,19 +19,23 @@ pub struct CameraSensor {
 }
 
 impl CameraSensor {
-    pub(super) unsafe fn init(&self, i2c_dev: i2c_master_dev_handle_t) {
+    pub(super) unsafe fn init(&self, i2c_dev: i2c_master_dev_handle_t) -> bool {
         for &(reg, val) in self.init_table {
-            self.write(i2c_dev, reg, val);
+            if !self.write(i2c_dev, reg, val) {
+                return false;
+            }
             if self.delayed_registers.contains(&reg) {
                 std::thread::sleep(Duration::from_millis(20));
             }
         }
+        true
     }
 
-    pub(super) unsafe fn enable(&self, i2c_dev: i2c_master_dev_handle_t) {
-        self.write(i2c_dev, 0x302c, 0x00);
-        self.write(i2c_dev, 0x0100, 0x01);
+    pub(super) unsafe fn enable(&self, i2c_dev: i2c_master_dev_handle_t) -> bool {
+        if !self.write(i2c_dev, 0x302c, 0x00) { return false; }
+        if !self.write(i2c_dev, 0x0100, 0x01) { return false; }
         std::thread::sleep(Duration::from_millis(200));
+        true
     }
 
     unsafe fn write(&self, dev: i2c_master_dev_handle_t, reg: u16, val: u8) -> bool {

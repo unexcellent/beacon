@@ -86,7 +86,9 @@ impl Camera {
             let inner = interface.init(&sensor, &capture_buffer)?;
             inner.queue_receive(&capture_buffer)?;
 
-            sensor.enable(inner.i2c_dev);
+            if !sensor.enable(inner.i2c_dev) {
+                return Err(EspError::from_infallible::<ESP_ERR_INVALID_STATE>());
+            }
 
             let mut cam = Self {
                 wb_r: sensor.red_gain_seed,

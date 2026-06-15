@@ -33,9 +33,16 @@ impl CameraInterface {
         capture: &CaptureBuffer,
     ) -> Result<InnerCamera, EspError> {
         self.enable_reset()?;
-        let (mut i2c_bus, i2c_dev) = self.set_up_i2c(sensor)?;
-        self.disable_reset(&mut i2c_bus)?;
-        sensor.init(i2c_dev);
+        let (_i2c_bus, i2c_dev) = self.set_up_i2c(sensor)?;
+        self.disable_reset()?;
+        if !sensor.init(i2c_dev) {
+            log::warn!("Sensor init failed, retrying after reset");
+            self.enable_reset()?;
+            self.disable_reset()?;
+            if !sensor.init(i2c_dev) {
+                return Err(EspError::from_infallible::<ESP_ERR_INVALID_STATE>());
+            }
+        }
         self.enable_power()?;
         let csi = self.set_up_controller(sensor, capture)?;
         self.set_up_signal_processor(sensor)?;
@@ -76,7 +83,7 @@ impl CameraInterface {
         i2c_dev_cfg.dev_addr_length = i2c_addr_bit_len_t_I2C_ADDR_BIT_LEN_7;
         i2c_dev_cfg.device_address = sensor.i2c_address as u16;
         i2c_dev_cfg.scl_speed_hz = 100_000;
-        i2c_dev_cfg.scl_wait_us = 50_000;
+        i2c_dev_cfg.scl_wait_us = 5_000;
         let mut i2c_dev: i2c_master_dev_handle_t = core::ptr::null_mut();
         esp!(i2c_master_bus_add_device(
             i2c_bus,
@@ -87,24 +94,9 @@ impl CameraInterface {
         Ok((i2c_bus, i2c_dev))
     }
 
-    unsafe fn disable_reset(&self, i2c_bus: &mut i2c_master_bus_handle_t) -> Result<(), EspError> {
+    unsafe fn disable_reset(&self) -> Result<(), EspError> {
         gpio_set_level(self.xshutdn_pin as gpio_num_t, 1);
         std::thread::sleep(Duration::from_millis(300));
-        let mut bus_ok = false;
-        for attempt in 0..5u8 {
-            if i2c_master_bus_reset(*i2c_bus) == ESP_OK {
-                bus_ok = true;
-                break;
-            }
-            log::warn!("I2C bus reset attempt {} failed, retrying", attempt + 1);
-            std::thread::sleep(Duration::from_millis(200));
-        }
-        if !bus_ok {
-            log::warn!(
-                "I2C bus recovery failed after 5 attempts — continuing with default sensor state"
-            );
-        }
-
         Ok(())
     }
 
