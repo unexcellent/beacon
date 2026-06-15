@@ -9,9 +9,6 @@ use super::{OUTPUT_HEIGHT, OUTPUT_WIDTH};
 pub struct Image {
     pixels: Vec<RgbPixel>,
     index: usize,
-    fr: u64,
-    fg: u64,
-    fb: u64,
 }
 
 impl Image {
@@ -26,9 +23,6 @@ impl Image {
         let bl_scale = 255.0 / (255.0 - bl).max(1.0);
 
         let mut pixels = Vec::with_capacity(OUTPUT_WIDTH * OUTPUT_HEIGHT);
-        let mut fr: u64 = 0;
-        let mut fg: u64 = 0;
-        let mut fb: u64 = 0;
 
         for dy in 0..OUTPUT_HEIGHT {
             if dy % 40 == 0 {
@@ -47,10 +41,6 @@ impl Image {
                 let lg = ((ag - bl) * bl_scale).max(0.0);
                 let lb = ((ab - bl) * bl_scale).max(0.0);
 
-                fr += lr as u64;
-                fg += lg as u64;
-                fb += lb as u64;
-
                 let pixel = if super::watermark::is_white_at(dx, dy) {
                     RgbPixel::new(255, 255, 255)
                 } else {
@@ -64,25 +54,11 @@ impl Image {
             }
         }
 
-        Self {
-            pixels,
-            index: 0,
-            fr,
-            fg,
-            fb,
-        }
+        Self { pixels, index: 0 }
     }
 
-    pub fn width(&self) -> usize {
-        OUTPUT_WIDTH
-    }
-    pub fn height(&self) -> usize {
-        OUTPUT_HEIGHT
-    }
-
-    pub(super) fn channel_sums(&self) -> (u64, u64, u64) {
-        (self.fr, self.fg, self.fb)
-    }
+    pub fn width(&self) -> usize { OUTPUT_WIDTH }
+    pub fn height(&self) -> usize { OUTPUT_HEIGHT }
 }
 
 impl Iterator for Image {
@@ -122,12 +98,9 @@ unsafe fn sample_bayer_region(
         .max(sx0 + 2)
         .min(src_width);
 
-    let mut sr = 0u32;
-    let mut cr = 0u32;
-    let mut sg = 0u32;
-    let mut cg = 0u32;
-    let mut sb = 0u32;
-    let mut cb = 0u32;
+    let mut sr = 0u32; let mut cr = 0u32;
+    let mut sg = 0u32; let mut cg = 0u32;
+    let mut sb = 0u32; let mut cb = 0u32;
 
     for sy in sy0..sy1 {
         let row = src.add(sy * row_bytes);
@@ -136,18 +109,9 @@ unsafe fn sample_bayer_region(
             let v = raw10_pixel(row, sx);
             // RGGB Bayer: R at even row + even col, B at odd row + odd col
             match (yodd, sx & 1) {
-                (0, 0) => {
-                    sr += v;
-                    cr += 1;
-                }
-                (1, 1) => {
-                    sb += v;
-                    cb += 1;
-                }
-                _ => {
-                    sg += v;
-                    cg += 1;
-                }
+                (0, 0) => { sr += v; cr += 1; }
+                (1, 1) => { sb += v; cb += 1; }
+                _      => { sg += v; cg += 1; }
             }
         }
     }

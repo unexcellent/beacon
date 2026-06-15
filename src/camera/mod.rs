@@ -104,21 +104,12 @@ impl Camera {
 
     pub fn calibrate(&mut self, frames: u32) {
         for _ in 0..frames {
-            let (fr, fg, fb) = self.capture().channel_sums();
-            if fr > 0 && fg > 0 && fb > 0 {
-                let gr = (fg as f32 / fr as f32).clamp(0.5, 4.0);
-                let gb = (fg as f32 / fb as f32).clamp(0.5, 4.0);
-                self.wb_r = self.wb_r * 0.5 + gr * 0.5;
-                self.wb_b = self.wb_b * 0.5 + gb * 0.5;
-            }
+            self.wait_for_frame();
         }
     }
 
     pub fn capture(&mut self) -> Image {
-        while !FRAME_READY.swap(false, Ordering::AcqRel) {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-
+        self.wait_for_frame();
         unsafe {
             Image::new(
                 self.capture_buffer.buf as *const u8,
@@ -127,6 +118,12 @@ impl Camera {
                 self.wb_r,
                 self.wb_b,
             )
+        }
+    }
+
+    fn wait_for_frame(&self) {
+        while !FRAME_READY.swap(false, Ordering::AcqRel) {
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
