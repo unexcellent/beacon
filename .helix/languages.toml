@@ -1,0 +1,10 @@
+[[language]]
+name = "rust"
+
+[language-server.rust-analyzer.config]
+cargo.target = "riscv32imafc-esp-espidf"
+cargo.features = "all"
+cargo.extraEnv = { RUSTUP_TOOLCHAIN = "nightly" }
+check.command = "clippy"
+check.extraArgs = ["--target", "riscv32imafc-esp-espidf"]
+rustfmt.extraArgs = ["--edition", "2024"]
