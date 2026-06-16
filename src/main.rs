@@ -14,33 +14,6 @@ const BAUD_RATE: u32 = 115_200;
 const RX_PIN: i32 = 37;
 const DE_PIN: i32 = 38;
 
-fn handle_csp_frame(frame: &[u8], ota: &mut ota::OtaState) {
-    match csp::CspHeader::parse(frame) {
-        Some((h, payload)) => {
-            log::info!("amogus");
-            log::info!(
-                "CSP prio={} src={} dst={} dport={} sport={} flags=0x{:02x} payload({} bytes)",
-                h.priority,
-                h.src,
-                h.dst,
-                h.dport,
-                h.sport,
-                h.flags,
-                payload.len(),
-            );
-            if h.dport == 10 {
-                ota.handle(payload);
-            }
-        }
-        None => {
-            log::warn!(
-                "KISS frame too short for CSP header ({} bytes)",
-                frame.len()
-            );
-        }
-    }
-}
-
 fn main() {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
@@ -68,6 +41,7 @@ fn main() {
         DE_PIN,
     );
 
+    let csp = csp::CspStack::new();
     let mut kiss = kiss::KissDecoder::new();
     let mut ota = ota::OtaState::new();
     let mut buf = [0u8; 64];
@@ -77,7 +51,11 @@ fn main() {
             Ok(n) => {
                 for &b in &buf[..n] {
                     if let Some(frame) = kiss.push(b) {
-                        handle_csp_frame(&frame, &mut ota);
+                        csp.inject(&frame);
+                        csp.route_work();
+                        if let Some(pkt) = csp.recv_ota() {
+                            ota.handle(pkt.data());
+                        }
                     }
                 }
             }

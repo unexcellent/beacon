@@ -17,3 +17,8 @@ ESP_IDF_VERSION = "v5.5.3"
 ESP_IDF_TOOLS_INSTALL_DIR = "workspace"
 IDF_PATH = { value = ".embuild/espressif/esp-idf/v5.5.3", relative = true, force = true }
 IDF_PYTHON_ENV_PATH = { value = ".embuild/espressif/python_env/idf5.5_py3.13_env", relative = true, force = true }
+CC_riscv32imafc_esp_espidf = { value = "local/riscv32-cc.sh", relative = true }
+AR_riscv32imafc_esp_espidf = { value = ".embuild/espressif/tools/riscv32-esp-elf/esp-14.2.0_20251107/riscv32-esp-elf/bin/riscv32-esp-elf-ar", relative = true }
+# bindgen (HOST-side clang) needs the toolchain's stdint.h when parsing CSP headers.
+# Target triple hyphens → underscores for the env-var name.
+BINDGEN_EXTRA_CLANG_ARGS_riscv32imafc_esp_espidf = "-I/Users/tk/user/dev/beacon/.embuild/espressif/tools/riscv32-esp-elf/esp-14.2.0_20251107/riscv32-esp-elf/riscv32-esp-elf/include"
