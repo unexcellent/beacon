@@ -29,6 +29,7 @@ esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git" }
 [dependencies]
 log = "0.4"
 esp-idf-sys = "0.37"
+esp-idf-hal = "0.46"
 esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
 sstv = { git = "https://github.com/unexcellent/sstv.git", branch = "main" }
 
