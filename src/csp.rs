@@ -6,6 +6,7 @@ use libcsp::{export_arch, interface, socket_opts, CspConfig, CspInterface, CspNo
 use libcsp::sys as csp_sys;
 
 pub const OTA_PORT: u8 = 10;
+pub const BEACON_PORT: u8 = 9;
 
 // ── CspArch backed by FreeRTOS (via esp_idf_sys) ────────────────────────────
 
@@ -118,7 +119,7 @@ pub struct CspStack {
 impl CspStack {
     pub fn new() -> Self {
         let node = CspConfig::new()
-            .address(1)
+            .address(7)
             .init()
             .expect("CSP init failed");
 
@@ -188,5 +189,20 @@ impl CspStack {
     /// Non-blocking poll for a packet on the OTA port; returns it if one arrived.
     pub fn recv_ota(&self) -> Option<Packet> {
         self.socket.recvfrom(0)
+    }
+
+    /// Build a KISS-framed CSP beacon packet (src=1 → dst=0, port BEACON_PORT).
+    /// Returns the raw bytes ready to write to UART.
+    pub fn beacon_frame() -> Vec<u8> {
+        // CSP v1 32-bit header: pri=2, src=1, dst=0, dport=BEACON_PORT, sport=0, flags=0
+        let word: u32 = (2u32 << 30)
+            | (7u32 << 25)
+            | (0u32 << 20)
+            | ((BEACON_PORT as u32) << 14)
+            | (0u32 << 8)
+            | 0;
+        let mut frame = word.to_be_bytes().to_vec();
+        frame.extend_from_slice(b"AWAKE");
+        crate::kiss::kiss_encode(&frame)
     }
 }

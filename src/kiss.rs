@@ -3,6 +3,22 @@ const FESC: u8 = 0xDB;
 const TFEND: u8 = 0xDC;
 const TFESC: u8 = 0xDD;
 
+/// Encode `data` as a KISS data frame (command 0x00).
+pub fn kiss_encode(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len() + 4);
+    out.push(FEND);
+    out.push(0x00);
+    for &b in data {
+        match b {
+            FEND => { out.push(FESC); out.push(TFEND); }
+            FESC => { out.push(FESC); out.push(TFESC); }
+            _ => out.push(b),
+        }
+    }
+    out.push(FEND);
+    out
+}
+
 enum State {
     Idle,
     Command,
