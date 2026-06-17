@@ -13,6 +13,7 @@ build-std = ["std", "panic_abort"]
 
 [env]
 MCU = "esp32p4"
+LIBCSP_BUFFER_SIZE = "600"
 ESP_IDF_VERSION = "v5.5.3"
 ESP_IDF_TOOLS_INSTALL_DIR = "workspace"
 IDF_PATH = { value = ".embuild/espressif/esp-idf/v5.5.3", relative = true, force = true }
