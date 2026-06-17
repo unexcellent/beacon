@@ -40,10 +40,11 @@ impl OtaState {
             return;
         }
         match payload[0] {
+            0x00 => log::info!("OTA: incoming firmware update announced"),
             0x01 => self.cmd_begin(&payload[1..]),
             0x02 => self.cmd_data(&payload[1..]),
             0x03 => self.cmd_end(),
-            cmd => log::warn!("OTA: unknown command 0x{:02x}", cmd),
+            cmd  => log::warn!("OTA: unknown command 0x{:02x}", cmd),
         }
     }
 

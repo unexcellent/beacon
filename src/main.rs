@@ -15,8 +15,7 @@ const TX_PIN: i32 = 38;
 const RX_PIN: i32 = 37;
 const DE_PIN: i32 = 39;
 
-fn send_beacon(uart: &UartDriver, de: &mut PinDriver<'_, Output>) {
-    let frame = csp::CspStack::beacon_frame();
+fn send_frame(uart: &UartDriver, de: &mut PinDriver<'_, Output>, frame: &[u8]) {
     de.set_high().unwrap();
     let mut sent = 0;
     while sent < frame.len() {
@@ -26,7 +25,11 @@ fn send_beacon(uart: &UartDriver, de: &mut PinDriver<'_, Output>) {
     // Wait one byte-period for the shift register to drain before releasing the bus.
     delay::FreeRtos::delay_ms(1);
     de.set_low().unwrap();
-    log::info!("Beacon sent ({} bytes)", frame.len());
+}
+
+fn send_beacon(uart: &UartDriver, de: &mut PinDriver<'_, Output>) {
+    let frame = csp::CspStack::beacon_frame();
+    send_frame(uart, de, &frame);
 }
 
 fn main() {
@@ -69,9 +72,19 @@ fn main() {
                 if let Some(frame) = kiss.push(b) {
                     csp.inject(&frame);
                     csp.route_work();
+
                     if let Some(pkt) = csp.recv_ota() {
                         ota.handle(pkt.data());
                     }
+
+                    if let Some(pkt) = csp.recv_ping() {
+                        let id = pkt.id();
+                        let src = unsafe { core::ptr::addr_of!(id.src).read_unaligned() };
+                        log::info!("CSP: PING from node {} — sending pong", src);
+                        let reply = csp::CspStack::pong_frame(&pkt);
+                        send_frame(&uart, &mut de, &reply);
+                    }
+
                 }
             }
         }

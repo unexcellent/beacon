@@ -5,6 +5,7 @@ use libcsp::arch::CspArch;
 use libcsp::{export_arch, interface, socket_opts, CspConfig, CspInterface, CspNode, Packet, Socket};
 use libcsp::sys as csp_sys;
 
+pub const PING_PORT: u8 = 1;
 pub const OTA_PORT: u8 = 10;
 pub const BEACON_PORT: u8 = 9;
 
@@ -21,7 +22,6 @@ unsafe impl CspArch for EspArch {
         (unsafe { esys::esp_timer_get_time() } / 1_000_000) as u32
     }
 
-    // Binary semaphore: counting semaphore with max=1, initial=0.
     fn bin_sem_create(&self) -> *mut c_void {
         unsafe { esys::xQueueCreateCountingSemaphore(1, 0) as *mut c_void }
     }
@@ -39,7 +39,6 @@ unsafe impl CspArch for EspArch {
         }
     }
 
-    // Mutex (queueQUEUE_TYPE_MUTEX = 1).
     fn mutex_create(&self) -> *mut c_void {
         unsafe { esys::xQueueCreateMutex(1) as *mut c_void }
     }
@@ -57,7 +56,6 @@ unsafe impl CspArch for EspArch {
         }
     }
 
-    // Queue (queueQUEUE_TYPE_BASE = 0).
     fn queue_create(&self, length: usize, item_size: usize) -> *mut c_void {
         unsafe {
             esys::xQueueGenericCreate(
@@ -76,7 +74,7 @@ unsafe impl CspArch for EspArch {
                 queue as esys::QueueHandle_t,
                 item,
                 timeout_ms as esys::TickType_t,
-                0, // queueSEND_TO_BACK
+                0,
             ) != 0
         }
     }
@@ -103,9 +101,37 @@ struct UartIface;
 
 impl CspInterface for UartIface {
     fn nexthop(&mut self, _via: u16, _packet: Packet, _from_me: bool) {}
-    fn name(&self) -> &str {
-        "UART"
+    fn name(&self) -> &str { "UART" }
+}
+
+// ── Logging helpers ──────────────────────────────────────────────────────────
+
+fn fmt_payload(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return "(empty)".into();
     }
+    if let Ok(s) = core::str::from_utf8(bytes) {
+        if s.chars().all(|c| !c.is_control()) {
+            return format!("\"{}\"", s);
+        }
+    }
+    if bytes.len() <= 32 {
+        bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
+    } else {
+        format!("({} bytes)", bytes.len())
+    }
+}
+
+fn log_frame(dir: &str, raw: &[u8]) {
+    if raw.len() < 4 { return; }
+    let word  = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
+    let src   = (word >> 25) & 0x1F;
+    let dst   = (word >> 20) & 0x1F;
+    let dport = (word >> 14) & 0x3F;
+    let sport = (word >>  8) & 0x3F;
+    let flags = word & 0xFF;
+    log::info!("[{}] from {}:{} to {}:{} is {} (flags 0x{:02x})",
+        dir, src, sport, dst, dport, fmt_payload(&raw[4..]), flags);
 }
 
 // ── Public CSP stack ─────────────────────────────────────────────────────────
@@ -113,7 +139,8 @@ impl CspInterface for UartIface {
 pub struct CspStack {
     node: CspNode,
     handle: interface::InterfaceHandle,
-    socket: Socket,
+    ping_socket: Socket,
+    ota_socket: Socket,
 }
 
 impl CspStack {
@@ -125,10 +152,13 @@ impl CspStack {
 
         let handle = interface::register(UartIface);
 
-        let mut socket = Socket::new(socket_opts::CONN_LESS);
-        socket.bind(OTA_PORT).expect("CSP socket bind failed");
+        let mut ping_socket = Socket::new(socket_opts::CONN_LESS);
+        ping_socket.bind(PING_PORT).expect("CSP ping socket bind failed");
 
-        Self { node, handle, socket }
+        let mut ota_socket = Socket::new(socket_opts::CONN_LESS);
+        ota_socket.bind(OTA_PORT).expect("CSP OTA socket bind failed");
+
+        Self { node, handle, ping_socket, ota_socket }
     }
 
     /// Parse a raw KISS frame (CSP v1 header + payload) and hand it to the router.
@@ -153,30 +183,22 @@ impl CspStack {
             }
         }
 
-        // Build csp_id_t from the CSP v1 32-bit big-endian header.
-        // Layout: priority[31:30] src[29:25] dst[24:20] dport[19:14] sport[13:8] flags[7:0]
-        // csp_id_t layout: pri:u8, flags:u8, src:u16, dst:u16, dport:u8, sport:u8
+        // CSP v1 32-bit big-endian: priority[31:30] src[29:25] dst[24:20] dport[19:14] sport[13:8] flags[7:0]
         let mut id: csp_sys::csp_id_t = unsafe { core::mem::zeroed() };
         id.pri   = ((word >> 30) & 0x03) as u8;
         id.src   = ((word >> 25) & 0x1F) as u16;
         id.dst   = ((word >> 20) & 0x1F) as u16;
         id.dport = ((word >> 14) & 0x3F) as u8;
-        id.sport = ((word >> 8)  & 0x3F) as u8;
+        id.sport = ((word >>  8) & 0x3F) as u8;
         id.flags = (word & 0xFF)          as u8;
         pkt.set_id(id);
 
-        // Read packed fields via copies to avoid unaligned-reference UB.
-        let (src, dst) = unsafe {
-            (
-                core::ptr::addr_of!(id.src).read_unaligned(),
-                core::ptr::addr_of!(id.dst).read_unaligned(),
-            )
-        };
-        log::info!(
-            "CSP prio={} src={} dst={} dport={} sport={} flags=0x{:02x} payload({} bytes)",
-            id.pri, src, dst, id.dport, id.sport, id.flags,
-            payload.len(),
-        );
+        log_frame("RX", frame);
+
+        // Ports with no socket: already logged, just drop.
+        if id.dport != PING_PORT && id.dport != OTA_PORT {
+            return;
+        }
 
         self.handle.rx(pkt);
     }
@@ -186,23 +208,45 @@ impl CspStack {
         self.node.route_work().ok();
     }
 
-    /// Non-blocking poll for a packet on the OTA port; returns it if one arrived.
-    pub fn recv_ota(&self) -> Option<Packet> {
-        self.socket.recvfrom(0)
+    /// Non-blocking poll for a packet on the ping port (1).
+    pub fn recv_ping(&self) -> Option<Packet> {
+        self.ping_socket.recvfrom(0)
     }
 
-    /// Build a KISS-framed CSP beacon packet (src=1 → dst=0, port BEACON_PORT).
-    /// Returns the raw bytes ready to write to UART.
+    /// Non-blocking poll for a packet on OTA port 10.
+    pub fn recv_ota(&self) -> Option<Packet> {
+        self.ota_socket.recvfrom(0)
+    }
+
+    /// Build a KISS-framed pong reply for an incoming ping packet.
+    /// Swaps src/dst and sport/dport, echoes the payload back.
+    pub fn pong_frame(ping: &Packet) -> Vec<u8> {
+        let id = ping.id();
+        let src = unsafe { core::ptr::addr_of!(id.src).read_unaligned() };
+        // Reply: src=7 (us), dst=pinger, dport=pinger's sport, sport=PING_PORT
+        let word: u32 = (2u32 << 30)
+            | (7u32 << 25)
+            | ((src as u32) << 20)
+            | ((id.sport as u32) << 14)
+            | ((PING_PORT as u32) << 8)
+            | 0;
+        let mut raw = word.to_be_bytes().to_vec();
+        raw.extend_from_slice(ping.data());
+        log_frame("TX", &raw);
+        crate::kiss::kiss_encode(&raw)
+    }
+
+    /// Build a KISS-framed CSP beacon (src=7 → dst=0, port BEACON_PORT, payload "AWAKE").
     pub fn beacon_frame() -> Vec<u8> {
-        // CSP v1 32-bit header: pri=2, src=1, dst=0, dport=BEACON_PORT, sport=0, flags=0
         let word: u32 = (2u32 << 30)
             | (7u32 << 25)
             | (0u32 << 20)
             | ((BEACON_PORT as u32) << 14)
             | (0u32 << 8)
             | 0;
-        let mut frame = word.to_be_bytes().to_vec();
-        frame.extend_from_slice(b"AWAKE");
-        crate::kiss::kiss_encode(&frame)
+        let mut raw = word.to_be_bytes().to_vec();
+        raw.extend_from_slice(b"AWAKE");
+        log_frame("TX", &raw);
+        crate::kiss::kiss_encode(&raw)
     }
 }
