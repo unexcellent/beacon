@@ -1,36 +1,12 @@
-mod csp;
-mod kiss;
-mod ota;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use esp_idf_hal::{
-    delay,
-    gpio::{AnyIOPin, Output, PinDriver},
+    delay::FreeRtos,
+    gpio::{InterruptType, PinDriver, Pull},
     peripherals::Peripherals,
-    uart::{self, UartDriver},
-    units::Hertz,
 };
 
-const BAUD_RATE: u32 = 115_200;
-const TX_PIN: i32 = 38;
-const RX_PIN: i32 = 37;
-const DE_PIN: i32 = 39;
-
-fn send_frame(uart: &UartDriver, de: &mut PinDriver<'_, Output>, frame: &[u8]) {
-    de.set_high().unwrap();
-    let mut sent = 0;
-    while sent < frame.len() {
-        sent += uart.write(&frame[sent..]).unwrap();
-    }
-    uart.flush_write().unwrap();
-    // Wait one byte-period for the shift register to drain before releasing the bus.
-    delay::FreeRtos::delay_ms(1);
-    de.set_low().unwrap();
-}
-
-fn send_beacon(uart: &UartDriver, de: &mut PinDriver<'_, Output>) {
-    let frame = csp::CspStack::beacon_frame();
-    send_frame(uart, de, &frame);
-}
+static EDGES: AtomicU32 = AtomicU32::new(0);
 
 fn main() {
     esp_idf_svc::sys::link_patches();
@@ -38,55 +14,31 @@ fn main() {
 
     let peripherals = Peripherals::take().unwrap();
 
+    // DE held LOW = receive mode on the THVD1424RGTR
     let mut de = PinDriver::output(peripherals.pins.gpio39).unwrap();
     de.set_low().unwrap();
 
-    let config = uart::config::Config::new().baudrate(Hertz(BAUD_RATE));
+    let mut rx = PinDriver::input(peripherals.pins.gpio37, Pull::Floating).unwrap();
+    rx.set_interrupt_type(InterruptType::AnyEdge).unwrap();
+    unsafe {
+        rx.subscribe(|| {
+            EDGES.fetch_add(1, Ordering::Relaxed);
+        })
+        .unwrap();
+    }
+    rx.enable_interrupt().unwrap();
 
-    let uart = UartDriver::new(
-        peripherals.uart1,
-        peripherals.pins.gpio38,
-        peripherals.pins.gpio37,
-        Option::<AnyIOPin>::None,
-        Option::<AnyIOPin>::None,
-        &config,
-    )
-    .unwrap();
+    log::info!("Monitoring G37 for edges via interrupt (DE=G39 held LOW)");
 
-    log::info!(
-        "Listening for UART at {} baud on GPIO {} (TX on GPIO {}, DE on GPIO {} held LOW)",
-        BAUD_RATE, RX_PIN, TX_PIN, DE_PIN,
-    );
-
-    let csp = csp::CspStack::new();
-    let mut kiss = kiss::KissDecoder::new();
-    let mut ota = ota::OtaState::new();
-
-    send_beacon(&uart, &mut de);
-
-    let mut buf = [0u8; 64];
-
+    let mut last = 0u32;
     loop {
-        if let Ok(n) = uart.read(&mut buf, delay::BLOCK) {
-            for &b in &buf[..n] {
-                if let Some(frame) = kiss.push(b) {
-                    csp.inject(&frame);
-                    csp.route_work();
+        FreeRtos::delay_ms(100);
+        rx.enable_interrupt().unwrap(); // re-arm after each ISR firing
 
-                    if let Some(pkt) = csp.recv_ota() {
-                        ota.handle(pkt.data());
-                    }
-
-                    if let Some(pkt) = csp.recv_ping() {
-                        let id = pkt.id();
-                        let src = unsafe { core::ptr::addr_of!(id.src).read_unaligned() };
-                        log::info!("CSP: PING from node {} — sending pong", src);
-                        let reply = csp::CspStack::pong_frame(&pkt);
-                        send_frame(&uart, &mut de, &reply);
-                    }
-
-                }
-            }
+        let total = EDGES.load(Ordering::Relaxed);
+        if total != last {
+            log::info!("G37: {} new edge(s) (total {})", total - last, total);
+            last = total;
         }
     }
 }
