@@ -80,6 +80,23 @@ impl KissDecoder {
     }
 }
 
+// ── CSP helpers ───────────────────────────────────────────────────────────────
+
+fn fmt_payload(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return "(empty)".into();
+    }
+    if bytes.len() > 32 {
+        return format!("({} bytes)", bytes.len());
+    }
+    if let Ok(s) = core::str::from_utf8(bytes) {
+        if s.bytes().all(|b| b >= 0x20 && b < 0x7f) {
+            return format!("\"{}\"", s);
+        }
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+}
+
 // ── CSP / KISS interface ──────────────────────────────────────────────────────
 
 /// Packets queued by nexthop() for transmission; drained by the main loop.
@@ -93,6 +110,9 @@ impl libcsp::CspInterface for UartKissIface {
             return;
         }
         let id = packet.id();
+        let (src, sport, dst, dport, flags) = (id.src, id.sport, id.dst, id.dport, id.flags);
+        log::info!("[UART TX] from {}:{} to {}:{} is {} (flags 0x{:02x})",
+            src, sport, dst, dport, fmt_payload(packet.data()), flags);
         let word: u32 = ((id.pri as u32) << 30)
             | ((id.src as u32) << 25)
             | ((id.dst as u32) << 20)
@@ -181,6 +201,15 @@ fn main() {
 
     log::info!("CSP node {} ready at {} baud (RX=G37 TX=G38 DE=G39)", NODE, BAUD_RATE);
 
+    if let Some(mut pkt) = libcsp::Packet::get(0) {
+        pkt.write(b"AVAILABLE").ok();
+        node.sendto(libcsp::Priority::Norm, 14, 1, NODE as u8, 0, pkt);
+    }
+    let to_send: Vec<u8> = std::mem::take(&mut *TX_BUF.lock().unwrap());
+    if !to_send.is_empty() {
+        send_bytes(&uart, &mut de, &to_send);
+    }
+
     let mut kiss = KissDecoder::new();
     let mut ota  = ota::OtaState::new();
     let mut buf  = [0u8; 512];
@@ -192,11 +221,11 @@ fn main() {
                     if let Some(pkt) = frame_to_packet(&frame) {
                         if !matches!(ota, ota::OtaState::Writing(_)) {
                             let id = pkt.id();
-                            let (src, sport, dst, dport) =
-                                (id.src, id.sport, id.dst, id.dport);
+                            let (src, sport, dst, dport, flags) =
+                                (id.src, id.sport, id.dst, id.dport, id.flags);
                             log::info!(
-                                "[RX] {}:{} → {}:{} ({} B)",
-                                src, sport, dst, dport, pkt.length()
+                                "[UART RX] from {}:{} to {}:{} is {} (flags 0x{:02x})",
+                                src, sport, dst, dport, fmt_payload(pkt.data()), flags
                             );
                         }
                         iface.rx(pkt);
