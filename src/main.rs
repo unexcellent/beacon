@@ -1,12 +1,12 @@
-use std::sync::atomic::{AtomicU32, Ordering};
-
 use esp_idf_hal::{
-    delay::FreeRtos,
-    gpio::{InterruptType, PinDriver, Pull},
+    delay,
+    gpio::{AnyIOPin, PinDriver},
     peripherals::Peripherals,
+    uart::{self, UartDriver},
+    units::Hertz,
 };
 
-static EDGES: AtomicU32 = AtomicU32::new(0);
+const BAUD_RATE: u32 = 115_200;
 
 fn main() {
     esp_idf_svc::sys::link_patches();
@@ -18,27 +18,25 @@ fn main() {
     let mut de = PinDriver::output(peripherals.pins.gpio39).unwrap();
     de.set_low().unwrap();
 
-    let mut rx = PinDriver::input(peripherals.pins.gpio37, Pull::Floating).unwrap();
-    rx.set_interrupt_type(InterruptType::AnyEdge).unwrap();
-    unsafe {
-        rx.subscribe(|| {
-            EDGES.fetch_add(1, Ordering::Relaxed);
-        })
-        .unwrap();
-    }
-    rx.enable_interrupt().unwrap();
+    let config = uart::config::Config::new().baudrate(Hertz(BAUD_RATE));
 
-    log::info!("Monitoring G37 for edges via interrupt (DE=G39 held LOW)");
+    let uart = UartDriver::new(
+        peripherals.uart1,
+        peripherals.pins.gpio38,
+        peripherals.pins.gpio37,
+        Option::<AnyIOPin>::None,
+        Option::<AnyIOPin>::None,
+        &config,
+    )
+    .unwrap();
 
-    let mut last = 0u32;
+    log::info!("Listening on UART1 at {} baud (RX=G37, DE=G39 held LOW)", BAUD_RATE);
+
+    let mut buf = [0u8; 64];
+
     loop {
-        FreeRtos::delay_ms(100);
-        rx.enable_interrupt().unwrap(); // re-arm after each ISR firing
-
-        let total = EDGES.load(Ordering::Relaxed);
-        if total != last {
-            log::info!("G37: {} new edge(s) (total {})", total - last, total);
-            last = total;
+        if let Ok(n) = uart.read(&mut buf, delay::BLOCK) {
+            log::info!("RX {} byte(s): {:02x?}", n, &buf[..n]);
         }
     }
 }
