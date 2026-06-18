@@ -125,8 +125,10 @@ fn handle_csp(
     let flags = (word & 0xFF) as u8;
     let payload = &frame[4..];
 
-    log::info!("[RX] from {}:{} to {}:{} is {} (flags 0x{:02x})",
-        src, sport, dst, dport, fmt_payload(payload), flags);
+    if !matches!(ota, ota::OtaState::Writing(_)) {
+        log::info!("[RX] from {}:{} to {}:{} is {} (flags 0x{:02x})",
+            src, sport, dst, dport, fmt_payload(payload), flags);
+    }
 
     if dst != NODE { return; }
 
