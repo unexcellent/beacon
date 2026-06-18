@@ -1,22 +1,24 @@
+mod csp_arch;
 mod ota;
 
 use esp_idf_hal::{
     delay,
-    gpio::{AnyIOPin, Output, PinDriver},
+    gpio::{Output, PinDriver},
     peripherals::Peripherals,
     uart::{self, UartDriver},
     units::Hertz,
 };
+use std::sync::Mutex;
 
 const BAUD_RATE: u32 = 115_200;
 const NODE: u16 = 7;
 const PING_PORT: u8 = 1;
-const OTA_PORT:  u8 = 10;
+const OTA_PORT: u8 = 10;
 
-// ─── KISS ────────────────────────────────────────────────────────────────────
+// ── KISS ──────────────────────────────────────────────────────────────────────
 
-const FEND:  u8 = 0xC0;
-const FESC:  u8 = 0xDB;
+const FEND: u8 = 0xC0;
+const FESC: u8 = 0xDB;
 const TFEND: u8 = 0xDC;
 const TFESC: u8 = 0xDD;
 
@@ -78,76 +80,69 @@ impl KissDecoder {
     }
 }
 
-// ─── CSP helpers ─────────────────────────────────────────────────────────────
+// ── CSP / KISS interface ──────────────────────────────────────────────────────
 
-fn fmt_payload(bytes: &[u8]) -> String {
-    if bytes.is_empty() {
-        return "(empty)".into();
-    }
-    if bytes.len() > 32 {
-        return format!("({} bytes)", bytes.len());
-    }
-    if let Ok(s) = core::str::from_utf8(bytes) {
-        if s.bytes().all(|b| b >= 0x20 && b < 0x7f) {
-            return format!("\"{}\"", s);
+/// Packets queued by nexthop() for transmission; drained by the main loop.
+static TX_BUF: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+struct UartKissIface;
+
+impl libcsp::CspInterface for UartKissIface {
+    fn nexthop(&mut self, _via: u16, packet: libcsp::Packet, from_me: bool) {
+        if !from_me {
+            return;
         }
+        let id = packet.id();
+        let word: u32 = ((id.pri as u32) << 30)
+            | ((id.src as u32) << 25)
+            | ((id.dst as u32) << 20)
+            | ((id.dport as u32) << 14)
+            | ((id.sport as u32) << 8)
+            | (id.flags as u32);
+        let mut raw = word.to_be_bytes().to_vec();
+        raw.extend_from_slice(packet.data());
+        TX_BUF.lock().unwrap().extend_from_slice(&kiss_encode(&raw));
     }
-    bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
+
+    fn name(&self) -> &str { "KISS" }
 }
 
-fn send_frame(uart: &UartDriver, de: &mut PinDriver<'_, Output>, frame: &[u8]) {
+/// Decode a KISS payload into a CSP Packet, or None if it is too short.
+fn frame_to_packet(frame: &[u8]) -> Option<libcsp::Packet> {
+    if frame.len() < 4 {
+        return None;
+    }
+    let word = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]);
+    let id = libcsp::sys::csp_id_t {
+        pri:   ((word >> 30) & 0x3) as u8,
+        flags:  (word        & 0xFF) as u8,
+        src:   ((word >> 25) & 0x1F) as u16,
+        dst:   ((word >> 20) & 0x1F) as u16,
+        dport: ((word >> 14) & 0x3F) as u8,
+        sport: ((word >>  8) & 0x3F) as u8,
+    };
+    let mut pkt = libcsp::Packet::get(0)?;
+    pkt.set_id(id);
+    if frame.len() > 4 {
+        pkt.write(&frame[4..]).ok()?;
+    }
+    Some(pkt)
+}
+
+// ── UART helper ───────────────────────────────────────────────────────────────
+
+fn send_bytes(uart: &UartDriver, de: &mut PinDriver<'_, Output>, data: &[u8]) {
     de.set_high().unwrap();
     let mut sent = 0;
-    while sent < frame.len() {
-        sent += uart.write(&frame[sent..]).unwrap();
+    while sent < data.len() {
+        sent += uart.write(&data[sent..]).unwrap();
     }
-    uart.flush_write().unwrap();
+    uart.wait_tx_done(delay::BLOCK).unwrap();
     delay::FreeRtos::delay_ms(1);
     de.set_low().unwrap();
 }
 
-fn handle_csp(
-    frame: &[u8],
-    uart: &UartDriver,
-    de: &mut PinDriver<'_, Output>,
-    ota: &mut ota::OtaState,
-) {
-    if frame.len() < 4 {
-        log::warn!("CSP: frame too short ({} bytes)", frame.len());
-        return;
-    }
-
-    let word  = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]);
-    let src   = ((word >> 25) & 0x1F) as u16;
-    let dst   = ((word >> 20) & 0x1F) as u16;
-    let dport = ((word >> 14) & 0x3F) as u8;
-    let sport = ((word >>  8) & 0x3F) as u8;
-    let flags = (word & 0xFF) as u8;
-    let payload = &frame[4..];
-
-    if !matches!(ota, ota::OtaState::Writing(_)) {
-        log::info!("[RX] from {}:{} to {}:{} is {} (flags 0x{:02x})",
-            src, sport, dst, dport, fmt_payload(payload), flags);
-    }
-
-    if dst != NODE { return; }
-
-    if dport == PING_PORT {
-        let pong_word: u32 = (2u32 << 30)
-            | ((NODE  as u32) << 25)
-            | ((src   as u32) << 20)
-            | ((sport as u32) << 14)
-            | ((PING_PORT as u32) << 8);
-        let mut pong = pong_word.to_be_bytes().to_vec();
-        pong.extend_from_slice(payload);
-        send_frame(uart, de, &kiss_encode(&pong));
-        log::info!("[TX] pong to {}:{}", src, sport);
-    } else if dport == OTA_PORT {
-        ota.handle(payload);
-    }
-}
-
-// ─── Entry point ─────────────────────────────────────────────────────────────
+// ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
     esp_idf_svc::sys::link_patches();
@@ -158,31 +153,80 @@ fn main() {
     let mut de = PinDriver::output(peripherals.pins.gpio39).unwrap();
     de.set_low().unwrap();
 
-    let config = uart::config::Config::new().baudrate(Hertz(BAUD_RATE));
-
     let uart = UartDriver::new(
         peripherals.uart1,
         peripherals.pins.gpio38,
         peripherals.pins.gpio37,
-        Option::<AnyIOPin>::None,
-        Option::<AnyIOPin>::None,
-        &config,
+        Option::<esp_idf_hal::gpio::AnyIOPin>::None,
+        Option::<esp_idf_hal::gpio::AnyIOPin>::None,
+        &uart::config::Config::new().baudrate(Hertz(BAUD_RATE)),
     )
     .unwrap();
 
-    log::info!("CSP node {} at {} baud (RX=G37, TX=G38, DE=G39)", NODE, BAUD_RATE);
+    let node = libcsp::CspConfig::new()
+        .address(NODE)
+        .hostname("beacon")
+        .model("esp32p4")
+        .init()
+        .expect("csp init");
+
+    let iface = libcsp::interface::register(UartKissIface);
+    unsafe { libcsp::route::set_default(iface.c_iface_ptr()).expect("default route") };
+
+    let mut ping_sock = libcsp::Socket::new(libcsp::socket_opts::NONE);
+    ping_sock.bind(PING_PORT).expect("bind ping");
+
+    let mut ota_sock = libcsp::Socket::new(libcsp::socket_opts::NONE);
+    ota_sock.bind(OTA_PORT).expect("bind ota");
+
+    log::info!("CSP node {} ready at {} baud (RX=G37 TX=G38 DE=G39)", NODE, BAUD_RATE);
 
     let mut kiss = KissDecoder::new();
     let mut ota  = ota::OtaState::new();
-    let mut buf  = [0u8; 256];
+    let mut buf  = [0u8; 512];
 
     loop {
         if let Ok(n) = uart.read(&mut buf, delay::BLOCK) {
             for &b in &buf[..n] {
                 if let Some(frame) = kiss.push(b) {
-                    handle_csp(&frame, &uart, &mut de, &mut ota);
+                    if let Some(pkt) = frame_to_packet(&frame) {
+                        if !matches!(ota, ota::OtaState::Writing(_)) {
+                            let id = pkt.id();
+                            let (src, sport, dst, dport) =
+                                (id.src, id.sport, id.dst, id.dport);
+                            log::info!(
+                                "[RX] {}:{} → {}:{} ({} B)",
+                                src, sport, dst, dport, pkt.length()
+                            );
+                        }
+                        iface.rx(pkt);
+                    }
                 }
             }
         }
+
+        let _ = node.route_work();
+
+        while let Some(conn) = ping_sock.accept(0) {
+            while let Some(pkt) = conn.read(0) {
+                conn.handle_service(pkt);
+            }
+        }
+
+        while let Some(conn) = ota_sock.accept(0) {
+            while let Some(pkt) = conn.read(0) {
+                ota.handle(pkt.data());
+            }
+        }
+
+        let to_send: Vec<u8> = {
+            let mut g = TX_BUF.lock().unwrap();
+            std::mem::take(&mut *g)
+        };
+        if !to_send.is_empty() {
+            send_bytes(&uart, &mut de, &to_send);
+        }
+
+        delay::FreeRtos::delay_ms(1);
     }
 }
