@@ -1,3 +1,5 @@
+mod ota;
+
 use esp_idf_hal::{
     delay,
     gpio::{AnyIOPin, Output, PinDriver},
@@ -9,6 +11,7 @@ use esp_idf_hal::{
 const BAUD_RATE: u32 = 115_200;
 const NODE: u16 = 7;
 const PING_PORT: u8 = 1;
+const OTA_PORT:  u8 = 10;
 
 // ─── KISS ────────────────────────────────────────────────────────────────────
 
@@ -103,7 +106,12 @@ fn send_frame(uart: &UartDriver, de: &mut PinDriver<'_, Output>, frame: &[u8]) {
     de.set_low().unwrap();
 }
 
-fn handle_csp(frame: &[u8], uart: &UartDriver, de: &mut PinDriver<'_, Output>) {
+fn handle_csp(
+    frame: &[u8],
+    uart: &UartDriver,
+    de: &mut PinDriver<'_, Output>,
+    ota: &mut ota::OtaState,
+) {
     if frame.len() < 4 {
         log::warn!("CSP: frame too short ({} bytes)", frame.len());
         return;
@@ -120,7 +128,9 @@ fn handle_csp(frame: &[u8], uart: &UartDriver, de: &mut PinDriver<'_, Output>) {
     log::info!("[RX] from {}:{} to {}:{} is {} (flags 0x{:02x})",
         src, sport, dst, dport, fmt_payload(payload), flags);
 
-    if dport == PING_PORT && dst == NODE {
+    if dst != NODE { return; }
+
+    if dport == PING_PORT {
         let pong_word: u32 = (2u32 << 30)
             | ((NODE  as u32) << 25)
             | ((src   as u32) << 20)
@@ -130,6 +140,8 @@ fn handle_csp(frame: &[u8], uart: &UartDriver, de: &mut PinDriver<'_, Output>) {
         pong.extend_from_slice(payload);
         send_frame(uart, de, &kiss_encode(&pong));
         log::info!("[TX] pong to {}:{}", src, sport);
+    } else if dport == OTA_PORT {
+        ota.handle(payload);
     }
 }
 
@@ -159,13 +171,14 @@ fn main() {
     log::info!("CSP node {} at {} baud (RX=G37, TX=G38, DE=G39)", NODE, BAUD_RATE);
 
     let mut kiss = KissDecoder::new();
-    let mut buf = [0u8; 64];
+    let mut ota  = ota::OtaState::new();
+    let mut buf  = [0u8; 256];
 
     loop {
         if let Ok(n) = uart.read(&mut buf, delay::BLOCK) {
             for &b in &buf[..n] {
                 if let Some(frame) = kiss.push(b) {
-                    handle_csp(&frame, &uart, &mut de);
+                    handle_csp(&frame, &uart, &mut de, &mut ota);
                 }
             }
         }
