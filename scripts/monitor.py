@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Passively monitor RS485 / KISS-framed CSP traffic.
-Never transmits anything. Decodes CSP headers when possible.
+Passively monitor RS422 / KISS-framed CSP traffic via the DSD TECH SH-U11
+in full-duplex RS422 mode (Y/Z = TX pair, A/B = RX pair, no A<->Y B<->Z jumpers).
+
+Never transmits anything.  Decodes CSP headers when possible.
 
 Usage:
     python3 monitor.py [port] [--baud N]
@@ -127,7 +129,7 @@ def main() -> None:
         print("ERROR: no serial port found — pass one explicitly")
         sys.exit(1)
 
-    print(f"Monitoring {port} @ {args.baud} baud  (read-only, Ctrl-C to stop)\n")
+    print(f"Monitoring {port} @ {args.baud} baud  RS422 full-duplex  (read-only, Ctrl-C to stop)\n")
 
     ser = serial.Serial(
         port=port,
@@ -137,7 +139,13 @@ def main() -> None:
         stopbits=serial.STOPBITS_ONE,
         timeout=0.1,
         rtscts=False,
+        dsrdtr=False,
     )
+    # In RS422 full-duplex mode the SH-U11's TX driver (Y/Z) is always enabled
+    # by hardware; RTS must not be asserted or it may activate direction control
+    # on adapters that support both RS485 and RS422 modes.
+    ser.rts = False
+    ser.dtr = False
 
     try:
         for raw in iter_kiss_frames(ser):

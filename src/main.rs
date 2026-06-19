@@ -151,15 +151,12 @@ fn frame_to_packet(frame: &[u8]) -> Option<libcsp::Packet> {
 
 // ── UART helper ───────────────────────────────────────────────────────────────
 
-fn send_bytes(uart: &UartDriver, de: &mut PinDriver<'_, Output>, data: &[u8]) {
-    de.set_high().unwrap();
+fn send_bytes(uart: &UartDriver, data: &[u8]) {
     let mut sent = 0;
     while sent < data.len() {
         sent += uart.write(&data[sent..]).unwrap();
     }
     uart.wait_tx_done(delay::BLOCK).unwrap();
-    delay::FreeRtos::delay_ms(1);
-    de.set_low().unwrap();
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -171,7 +168,8 @@ fn main() {
     let peripherals = Peripherals::take().unwrap();
 
     let mut de = PinDriver::output(peripherals.pins.gpio39).unwrap();
-    de.set_low().unwrap();
+    de.set_high().unwrap(); // RS422 full-duplex: TX driver always enabled
+    let _de = de; // hold pin configured for program lifetime
 
     let uart = UartDriver::new(
         peripherals.uart1,
@@ -207,7 +205,7 @@ fn main() {
     }
     let to_send: Vec<u8> = std::mem::take(&mut *TX_BUF.lock().unwrap());
     if !to_send.is_empty() {
-        send_bytes(&uart, &mut de, &to_send);
+        send_bytes(&uart, &to_send);
     }
 
     let mut kiss = KissDecoder::new();
@@ -253,7 +251,7 @@ fn main() {
             std::mem::take(&mut *g)
         };
         if !to_send.is_empty() {
-            send_bytes(&uart, &mut de, &to_send);
+            send_bytes(&uart, &to_send);
         }
 
         delay::FreeRtos::delay_ms(1);
