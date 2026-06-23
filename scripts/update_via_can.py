@@ -36,9 +36,9 @@ import time
 
 # ── SocketCAN raw frame ───────────────────────────────────────────────────────
 
-CAN_EFF_FLAG   = 0x80000000
-CAN_FRAME_FMT  = "=IB3x8s"
-CAN_DLC_MAX    = 8
+CAN_EFF_FLAG = 0x80000000
+CAN_FRAME_FMT = "=IB3x8s"
+CAN_DLC_MAX = 8
 
 # ── CFP v1 field layout within the 29-bit extended CAN ID ────────────────────
 #   bits 28-24: src    (5)
@@ -52,71 +52,76 @@ CAN_DLC_MAX    = 8
 #   bytes 4-5: payload length (big-endian u16)
 #   bytes 6-7: first 2 bytes of payload
 
-CFP_SRC_SHIFT    = 24
-CFP_DST_SHIFT    = 19
-CFP_TYPE_SHIFT   = 18
+CFP_SRC_SHIFT = 24
+CFP_DST_SHIFT = 19
+CFP_TYPE_SHIFT = 18
 CFP_REMAIN_SHIFT = 10
-CFP_BEGIN        = 0
-CFP_MORE         = 1
+CFP_BEGIN = 0
+CFP_MORE = 1
 
 CFP1_DATA_OFFSET = 6
-CFP1_BEGIN_DATA  = 2
+CFP1_BEGIN_DATA = 2
 
 # ── CSP / OTA constants ───────────────────────────────────────────────────────
 
-CSP_PRIO        = 2
+CSP_PRIO = 2
 CSP_SRC_DEFAULT = 0
-CSP_DST_DEFAULT = 7   # WIRE_NODE_SSTV / ESP32
-CSP_SPORT       = 63  # ephemeral source port
+CSP_DST_DEFAULT = 7  # WIRE_NODE_SSTV / ESP32
+CSP_SPORT = 63  # ephemeral source port
 
-OTA_PORT     = 10
+OTA_PORT = 10
 CMD_ANNOUNCE = 0x00
-CMD_BEGIN    = 0x01
-CMD_DATA     = 0x02
-CMD_END      = 0x03
+CMD_BEGIN = 0x01
+CMD_DATA = 0x02
+CMD_END = 0x03
 
 
 # ── CFP v1 framing ────────────────────────────────────────────────────────────
 
+
 def _cfp_id(src: int, dst: int, ftype: int, remain: int, ident: int = 0) -> int:
     return (
-        ((src    & 0x1F) << CFP_SRC_SHIFT)    |
-        ((dst    & 0x1F) << CFP_DST_SHIFT)    |
-        ((ftype  & 0x01) << CFP_TYPE_SHIFT)   |
-        ((remain & 0xFF) << CFP_REMAIN_SHIFT) |
-        (ident   & 0x3FF)
+        ((src & 0x1F) << CFP_SRC_SHIFT)
+        | ((dst & 0x1F) << CFP_DST_SHIFT)
+        | ((ftype & 0x01) << CFP_TYPE_SHIFT)
+        | ((remain & 0xFF) << CFP_REMAIN_SHIFT)
+        | (ident & 0x3FF)
     )
 
 
 def _csp1_header(src: int, dst: int, dport: int, sport: int) -> bytes:
     word = (
-        ((CSP_PRIO & 0x03) << 30) |
-        ((src      & 0x1F) << 25) |
-        ((dst      & 0x1F) << 20) |
-        ((dport    & 0x3F) << 14) |
-        ((sport    & 0x3F) <<  8)
+        ((CSP_PRIO & 0x03) << 30)
+        | ((src & 0x1F) << 25)
+        | ((dst & 0x1F) << 20)
+        | ((dport & 0x3F) << 14)
+        | ((sport & 0x3F) << 8)
     )
     return struct.pack(">I", word)
 
 
 def build_frames(
-    src: int, dst: int, dport: int, sport: int,
-    payload: bytes, ident: int = 0,
+    src: int,
+    dst: int,
+    dport: int,
+    sport: int,
+    payload: bytes,
+    ident: int = 0,
 ) -> list[tuple[int, bytes]]:
     """Return list of (cfp_can_id, data_bytes) for one CFP v1 CSP packet."""
-    csp_hdr      = _csp1_header(src, dst, dport, sport)
-    length       = len(payload)
+    csp_hdr = _csp1_header(src, dst, dport, sport)
+    length = len(payload)
     total_remain = (length + CFP1_DATA_OFFSET - 1) // CAN_DLC_MAX
 
     frames: list[tuple[int, bytes]] = []
     first_chunk = payload[:CFP1_BEGIN_DATA]
-    begin_data  = csp_hdr + struct.pack(">H", length) + first_chunk
+    begin_data = csp_hdr + struct.pack(">H", length) + first_chunk
     frames.append((_cfp_id(src, dst, CFP_BEGIN, total_remain, ident), begin_data))
 
     tx = len(first_chunk)
     while tx < length:
-        chunk  = payload[tx : tx + CAN_DLC_MAX]
-        tx    += len(chunk)
+        chunk = payload[tx : tx + CAN_DLC_MAX]
+        tx += len(chunk)
         remain = (length - tx + CAN_DLC_MAX - 1) // CAN_DLC_MAX
         frames.append((_cfp_id(src, dst, CFP_MORE, remain, ident), chunk))
 
@@ -125,8 +130,12 @@ def build_frames(
 
 def send_csp(
     sock: socket.socket,
-    src: int, dst: int, dport: int, sport: int,
-    payload: bytes, ident: int = 0,
+    src: int,
+    dst: int,
+    dport: int,
+    sport: int,
+    payload: bytes,
+    ident: int = 0,
 ) -> None:
     for cfp_id, data in build_frames(src, dst, dport, sport, payload, ident):
         raw = struct.pack(
@@ -139,6 +148,7 @@ def send_csp(
 
 
 # ── ELF / binary helpers ──────────────────────────────────────────────────────
+
 
 def _elf_to_bin(elf_path: str) -> str:
     fd, out_path = tempfile.mkstemp(suffix=".bin")
@@ -156,32 +166,46 @@ def _elf_to_bin(elf_path: str) -> str:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "-i", "--image", required=True, metavar="FILE",
+        "-i",
+        "--image",
+        required=True,
+        metavar="FILE",
         help="Firmware .bin or ELF file",
     )
     parser.add_argument(
-        "--can", default="can0",
+        "--can",
+        default="can0",
         help="SocketCAN interface (default: can0)",
     )
     parser.add_argument(
-        "--src", type=int, default=CSP_SRC_DEFAULT,
+        "--src",
+        type=int,
+        default=CSP_SRC_DEFAULT,
         help=f"Source CSP node ID (default {CSP_SRC_DEFAULT})",
     )
     parser.add_argument(
-        "--dst", type=int, default=CSP_DST_DEFAULT,
+        "--dst",
+        type=int,
+        default=CSP_DST_DEFAULT,
         help=f"Target CSP node ID (default {CSP_DST_DEFAULT} = SSTV/ESP32)",
     )
     parser.add_argument(
-        "--chunk", type=int, default=512,
+        "--chunk",
+        type=int,
+        default=512,
         help="Bytes per DATA packet (default 512)",
     )
     parser.add_argument(
-        "--delay", type=float, default=0.05,
+        "--delay",
+        type=float,
+        default=0.05,
         help="Seconds between packets (default 0.05)",
     )
     args = parser.parse_args()
@@ -196,7 +220,7 @@ def main() -> None:
     with open(bin_path, "rb") as f:
         firmware = f.read()
 
-    size     = len(firmware)
+    size = len(firmware)
     n_chunks = (size + args.chunk - 1) // args.chunk
 
     print(f"Interface: {args.can}")
@@ -232,38 +256,49 @@ def main() -> None:
     time.sleep(0.2)
 
     # 3. DATA: each chunk sent twice so the ESP32 can pick the intact copy
-    t0     = time.monotonic()
+    t0 = time.monotonic()
     offset = 0
 
     for _ in range(n_chunks):
-        chunk   = firmware[offset : offset + args.chunk]
+        chunk = firmware[offset : offset + args.chunk]
         payload = bytes([CMD_DATA]) + struct.pack("<I", offset) + chunk
         send_ff(payload)
         send_ff(payload)
 
-        done    = offset + len(chunk)
+        done = offset + len(chunk)
         elapsed = time.monotonic() - t0
-        pct     = done / size * 100
+        pct = done / size * 100
         if done > 0 and pct < 100:
             eta_s = elapsed / done * (size - done)
             h, rem = divmod(int(eta_s), 3600)
-            m, s   = divmod(rem, 60)
-            eta    = f"ETA {h:02d}:{m:02d}:{s:02d}"
+            m, s = divmod(rem, 60)
+            eta = f"ETA {h:02d}:{m:02d}:{s:02d}"
         else:
             eta = "         "
-        print(
-            f"\r[DATA ] {done:>7,}/{size:,}  {pct:5.1f}%  {elapsed:4.0f}s  {eta}",
-            end="",
-            flush=True,
-        )
+        if len(payload) <= 32:
+            payload_repr = " ".join(f"{b:02x}" for b in payload)
+        else:
+            payload_repr = f"{len(payload)} bytes"
+        print(f"[DATA ] {pct:5.1f}%  {eta}  {payload_repr}")
         offset += len(chunk)
 
-    print()
-
     # 4. END: trigger verify + reboot
-    send_ff(bytes([CMD_END]))
+    print("[END  ] Waiting for ESP32 flash write to complete...")
+    time.sleep(5)
+
+    end_payload = bytes([CMD_END])
+
+    # Send it 4 times with a significant gap to prevent Zephyr from clustering them
+    # and overflowing the ESP32's 128-byte RX FIFO.
+    for _ in range(10):
+        send_ff(end_payload)
+        payload_repr = " ".join(f"{b:02x}" for b in end_payload)
+        print(f"[END ] {payload_repr}")
+        time.sleep(1)
+
     print("[END  ] sent — ESP32 will verify and reboot")
 
+    time.sleep(3)
     sock.close()
 
 

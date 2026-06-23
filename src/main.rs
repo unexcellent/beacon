@@ -28,49 +28,88 @@ fn kiss_encode(data: &[u8]) -> Vec<u8> {
     out.push(0x00);
     for &b in data {
         match b {
-            FEND => { out.push(FESC); out.push(TFEND); }
-            FESC => { out.push(FESC); out.push(TFESC); }
-            _    => out.push(b),
+            FEND => {
+                out.push(FESC);
+                out.push(TFEND);
+            }
+            FESC => {
+                out.push(FESC);
+                out.push(TFESC);
+            }
+            _ => out.push(b),
         }
     }
     out.push(FEND);
     out
 }
 
-enum KissState { Idle, Command, Data, Escape }
+enum KissState {
+    Idle,
+    Command,
+    Data,
+    Escape,
+}
 
-struct KissDecoder { state: KissState, buf: Vec<u8> }
+struct KissDecoder {
+    state: KissState,
+    buf: Vec<u8>,
+}
 
 impl KissDecoder {
-    fn new() -> Self { Self { state: KissState::Idle, buf: Vec::new() } }
+    fn new() -> Self {
+        Self {
+            state: KissState::Idle,
+            buf: Vec::new(),
+        }
+    }
 
     fn push(&mut self, b: u8) -> Option<Vec<u8>> {
         match self.state {
             KissState::Idle => {
-                if b == FEND { self.state = KissState::Command; }
+                if b == FEND {
+                    self.state = KissState::Command;
+                }
                 None
             }
             KissState::Command => match b {
                 FEND => None,
-                0x00 => { self.buf.clear(); self.state = KissState::Data; None }
-                _    => { self.state = KissState::Idle; None }
+                0x00 => {
+                    self.buf.clear();
+                    self.state = KissState::Data;
+                    None
+                }
+                _ => {
+                    self.state = KissState::Idle;
+                    None
+                }
             },
             KissState::Data => match b {
                 FEND => {
-                    if self.buf.is_empty() { return None; }
+                    if self.buf.is_empty() {
+                        return None;
+                    }
                     let frame = self.buf.clone();
                     self.buf.clear();
                     self.state = KissState::Command;
                     Some(frame)
                 }
-                FESC => { self.state = KissState::Escape; None }
-                _    => { self.buf.push(b); None }
+                FESC => {
+                    self.state = KissState::Escape;
+                    None
+                }
+                _ => {
+                    self.buf.push(b);
+                    None
+                }
             },
             KissState::Escape => {
                 let decoded = match b {
                     TFEND => FEND,
                     TFESC => FESC,
-                    _     => { self.state = KissState::Idle; return None; }
+                    _ => {
+                        self.state = KissState::Idle;
+                        return None;
+                    }
                 };
                 self.buf.push(decoded);
                 self.state = KissState::Data;
@@ -89,12 +128,11 @@ fn fmt_payload(bytes: &[u8]) -> String {
     if bytes.len() > 32 {
         return format!("({} bytes)", bytes.len());
     }
-    if let Ok(s) = core::str::from_utf8(bytes) {
-        if s.bytes().all(|b| b >= 0x20 && b < 0x7f) {
-            return format!("\"{}\"", s);
-        }
-    }
-    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ── CSP / KISS interface ──────────────────────────────────────────────────────
@@ -111,8 +149,15 @@ impl libcsp::CspInterface for UartKissIface {
         }
         let id = packet.id();
         let (src, sport, dst, dport, flags) = (id.src, id.sport, id.dst, id.dport, id.flags);
-        log::info!("[UART TX] from {}:{} to {}:{} is {} (flags 0x{:02x})",
-            src, sport, dst, dport, fmt_payload(packet.data()), flags);
+        log::info!(
+            "[UART TX] from {}:{} to {}:{} is {} (flags 0x{:02x})",
+            src,
+            sport,
+            dst,
+            dport,
+            fmt_payload(packet.data()),
+            flags
+        );
         let word: u32 = ((id.pri as u32) << 30)
             | ((id.src as u32) << 25)
             | ((id.dst as u32) << 20)
@@ -124,7 +169,9 @@ impl libcsp::CspInterface for UartKissIface {
         TX_BUF.lock().unwrap().extend_from_slice(&kiss_encode(&raw));
     }
 
-    fn name(&self) -> &str { "KISS" }
+    fn name(&self) -> &str {
+        "KISS"
+    }
 }
 
 /// Decode a KISS payload into a CSP Packet, or None if it is too short.
@@ -134,12 +181,12 @@ fn frame_to_packet(frame: &[u8]) -> Option<libcsp::Packet> {
     }
     let word = u32::from_be_bytes([frame[0], frame[1], frame[2], frame[3]]);
     let id = libcsp::sys::csp_id_t {
-        pri:   ((word >> 30) & 0x3) as u8,
-        flags:  (word        & 0xFF) as u8,
-        src:   ((word >> 25) & 0x1F) as u16,
-        dst:   ((word >> 20) & 0x1F) as u16,
+        pri: ((word >> 30) & 0x3) as u8,
+        flags: (word & 0xFF) as u8,
+        src: ((word >> 25) & 0x1F) as u16,
+        dst: ((word >> 20) & 0x1F) as u16,
         dport: ((word >> 14) & 0x3F) as u8,
-        sport: ((word >>  8) & 0x3F) as u8,
+        sport: ((word >> 8) & 0x3F) as u8,
     };
     let mut pkt = libcsp::Packet::get(0)?;
     pkt.set_id(id);
@@ -197,7 +244,11 @@ fn main() {
     let mut ota_sock = libcsp::Socket::new(libcsp::socket_opts::NONE);
     ota_sock.bind(OTA_PORT).expect("bind ota");
 
-    log::info!("CSP node {} ready at {} baud (RX=G37 TX=G38 DE=G39)", NODE, BAUD_RATE);
+    log::info!(
+        "CSP node {} ready at {} baud (RX=G37 TX=G38 DE=G39)",
+        NODE,
+        BAUD_RATE
+    );
 
     if let Some(mut pkt) = libcsp::Packet::get(0) {
         pkt.write(b"AVAILABLE").ok();
@@ -209,8 +260,8 @@ fn main() {
     }
 
     let mut kiss = KissDecoder::new();
-    let mut ota  = ota::OtaState::new();
-    let mut buf  = [0u8; 512];
+    let mut ota = ota::OtaState::new();
+    let mut buf = [0u8; 512];
 
     loop {
         if let Ok(n) = uart.read(&mut buf, delay::BLOCK) {
@@ -223,7 +274,12 @@ fn main() {
                                 (id.src, id.sport, id.dst, id.dport, id.flags);
                             log::info!(
                                 "[UART RX] from {}:{} to {}:{} is {} (flags 0x{:02x})",
-                                src, sport, dst, dport, fmt_payload(pkt.data()), flags
+                                src,
+                                sport,
+                                dst,
+                                dport,
+                                fmt_payload(pkt.data()),
+                                flags
                             );
                         }
                         iface.rx(pkt);
