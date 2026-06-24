@@ -197,13 +197,13 @@ def main() -> None:
     parser.add_argument(
         "--chunk",
         type=int,
-        default=512,
+        default=128,
         help="Bytes per DATA packet (default 512)",
     )
     parser.add_argument(
         "--delay",
         type=float,
-        default=0.05,
+        default=0.025,
         help="Seconds between packets (default 0.05)",
     )
     args = parser.parse_args()
@@ -281,21 +281,14 @@ def main() -> None:
 
     # 4. END: trigger verify + reboot
     print("[END  ] Waiting for ESP32 flash write to complete...")
-    time.sleep(5)
+    time.sleep(1)
 
     end_payload = bytes([CMD_END])
 
-    # Send it 4 times with a significant gap to prevent Zephyr from clustering them
-    # and overflowing the ESP32's 128-byte RX FIFO.
-    for _ in range(10):
-        send_ff(end_payload)
-        payload_repr = " ".join(f"{b:02x}" for b in end_payload)
-        print(f"[END ] {payload_repr}")
-        time.sleep(1)
+    send_ff(end_payload)
+    print("[END  ] Finished")
 
-    print("[END  ] sent — ESP32 will verify and reboot")
-
-    time.sleep(3)
+    time.sleep(1)
     sock.close()
 
 
