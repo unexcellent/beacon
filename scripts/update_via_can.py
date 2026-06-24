@@ -8,11 +8,9 @@ forwards them over its RS485 link to the ESP32.
 Protocol (CSP port 10):
   ANNOUNCE (0x00): [cmd][chunk_size: u16 LE]
   BEGIN    (0x01): [cmd][total_size: u32 LE]
-  DATA     (0x02): [cmd][offset: u32 LE][data...]   (sent twice per chunk)
+  DATA     (0x02): [cmd][offset: u32 LE][data...]
   END      (0x03): [cmd]
 
-Each DATA chunk is sent twice. The ESP32 picks the copy with the expected byte
-count; if both copies are truncated it uses the second and flags an offset error.
 All commands are fire-and-forget; the script does not wait for replies.
 
 The CAN interface must be up before running:
@@ -255,14 +253,13 @@ def main() -> None:
     print(f"[BEGIN] {size:,} bytes")
     time.sleep(0.2)
 
-    # 3. DATA: each chunk sent twice so the ESP32 can pick the intact copy
+    # 3. DATA: one copy per chunk
     t0 = time.monotonic()
     offset = 0
 
     for _ in range(n_chunks):
         chunk = firmware[offset : offset + args.chunk]
         payload = bytes([CMD_DATA]) + struct.pack("<I", offset) + chunk
-        send_ff(payload)
         send_ff(payload)
 
         done = offset + len(chunk)

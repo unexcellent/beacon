@@ -135,6 +135,8 @@ fn fmt_payload(bytes: &[u8]) -> String {
         .join(" ")
 }
 
+const CSP_FLAG_CRC32: u8 = 0x10;
+
 // ── CSP / KISS interface ──────────────────────────────────────────────────────
 
 /// Packets queued by nexthop() for transmission; drained by the main loop.
@@ -191,7 +193,13 @@ fn frame_to_packet(frame: &[u8]) -> Option<libcsp::Packet> {
     let mut pkt = libcsp::Packet::get(0)?;
     pkt.set_id(id);
     if frame.len() > 4 {
-        pkt.write(&frame[4..]).ok()?;
+        let data = &frame[4..];
+        let data = if id.flags & CSP_FLAG_CRC32 != 0 && data.len() >= 4 {
+            &data[..data.len() - 4]
+        } else {
+            data
+        };
+        pkt.write(data).ok()?;
     }
     Some(pkt)
 }
@@ -224,7 +232,9 @@ fn main() {
         peripherals.pins.gpio37,
         Option::<esp_idf_hal::gpio::AnyIOPin>::None,
         Option::<esp_idf_hal::gpio::AnyIOPin>::None,
-        &uart::config::Config::new().baudrate(Hertz(BAUD_RATE)),
+        &uart::config::Config::new()
+            .baudrate(Hertz(BAUD_RATE))
+            .rx_fifo_size(8192),
     )
     .unwrap();
 
@@ -273,13 +283,14 @@ fn main() {
                             let (src, sport, dst, dport, flags) =
                                 (id.src, id.sport, id.dst, id.dport, id.flags);
                             log::info!(
-                                "[UART RX] from {}:{} to {}:{} is {} (flags 0x{:02x})",
+                                "[UART RX] from {}:{} to {}:{} is {} (flags 0x{:02x}, len={})",
                                 src,
                                 sport,
                                 dst,
                                 dport,
                                 fmt_payload(pkt.data()),
-                                flags
+                                flags,
+                                pkt.data().len()
                             );
                         }
                         iface.rx(pkt);

@@ -23,8 +23,6 @@ pub struct OtaWriter {
     total: u32,
     received: u32,
     chunk_size: u16,
-    pending: Option<(u32, Vec<u8>)>,
-    offset_error: bool,
 }
 
 unsafe impl Send for OtaWriter {}
@@ -66,11 +64,7 @@ impl OtaState {
             return;
         }
         let total = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        let chunk_size = if let OtaState::Idle(sz) = self {
-            *sz
-        } else {
-            0
-        };
+        let chunk_size = if let OtaState::Idle(sz) = self { *sz } else { 0 };
 
         if matches!(self, OtaState::Writing(_)) {
             log::warn!("OTA: aborting previous session");
@@ -94,8 +88,6 @@ impl OtaState {
                 total,
                 received: 0,
                 chunk_size,
-                pending: None,
-                offset_error: false,
             });
         }
         log::info!(
@@ -111,86 +103,69 @@ impl OtaState {
             return;
         };
 
-        if w.offset_error {
-            log::error!("OTA DATA: offset error — send a new announce to reset");
-            return;
-        }
-
         if data.len() < 5 {
             log::error!("OTA DATA: payload too short ({} bytes)", data.len());
+            *self = OtaState::Idle(0);
             return;
         }
-        let offset = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+
+        let base_offset = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         let raw = &data[4..];
 
-        let remaining = w.total.saturating_sub(offset);
-        let expected = (w.chunk_size as u32).min(remaining) as usize;
-
-        let chunk: Vec<u8> = if raw.len() >= expected {
-            raw[..expected].to_vec()
-        } else {
-            raw.to_vec()
-        };
-
-        let Some((first_offset, first_chunk)) = w.pending.take() else {
-            w.pending = Some((offset, chunk));
-            return;
-        };
-
-        if offset != first_offset {
-            log::warn!(
-                "OTA DATA: missed second copy of {:#x}, got {:#x}",
-                first_offset,
-                offset
+        if base_offset != w.received {
+            log::error!(
+                "OTA DATA: gap detected — expected offset {:#x}, got {:#x} — aborting",
+                w.received,
+                base_offset
             );
-
-            let prev_remaining = w.total.saturating_sub(first_offset);
-            let prev_expected = (w.chunk_size as u32).min(prev_remaining) as usize;
-
-            if first_chunk.len() == prev_expected {
-                if !Self::write_chunk(w, first_offset, &first_chunk) {
-                    *self = OtaState::Idle(0);
-                    return;
-                }
-            } else {
-                log::error!(
-                    "OTA DATA: first copy at {:#x} was corrupt and second copy was lost",
-                    first_offset
-                );
-                w.offset_error = true;
-            }
-
-            w.pending = Some((offset, chunk));
+            *self = OtaState::Idle(0);
             return;
         }
 
-        let first_ok = first_chunk.len() == expected;
-        let second_ok = chunk.len() == expected;
-
-        let to_write: Vec<u8> = if first_ok {
-            first_chunk
-        } else if second_ok {
-            log::warn!(
-                "OTA DATA: first copy at {:#x} dropped bytes ({}/{}), using second",
-                offset,
-                first_chunk.len(),
-                expected
-            );
-            chunk
+        // Strip any trailing relay bytes that exceed a whole number of chunks.
+        // The relay may append 4 bytes (CRC without flag) and/or batch multiple
+        // consecutive OTA packets into one CSP frame.
+        let payload = if w.chunk_size > 0 {
+            let cs = w.chunk_size as usize;
+            let n_chunks = raw.len() / cs;
+            if n_chunks > 0 {
+                &raw[..n_chunks * cs]
+            } else {
+                raw
+            }
         } else {
-            log::error!(
-                "OTA DATA: both copies at {:#x} have wrong size (first={}, second={}, expected={}) — using second, offset error from now on",
-                offset,
-                first_chunk.len(),
-                chunk.len(),
-                expected
-            );
-            w.offset_error = true;
-            chunk
+            raw
         };
 
-        if !Self::write_chunk(w, offset, &to_write) {
-            *self = OtaState::Idle(0);
+        let mut pos = 0usize;
+        while pos < payload.len() {
+            let offset = base_offset + pos as u32;
+            let remaining = w.total.saturating_sub(offset);
+            let expected = if w.chunk_size > 0 {
+                (w.chunk_size as u32).min(remaining) as usize
+            } else {
+                payload.len() - pos
+            };
+            let slice = &payload[pos..pos + expected.min(payload.len() - pos)];
+            let is_last = offset + slice.len() as u32 >= w.total;
+
+            if w.chunk_size > 0 && slice.len() < expected && !is_last {
+                log::error!(
+                    "OTA DATA: chunk at {:#x} too short (got={}, expected={}) — aborting",
+                    offset,
+                    slice.len(),
+                    expected
+                );
+                *self = OtaState::Idle(0);
+                return;
+            }
+
+            if !Self::write_chunk(w, offset, slice) {
+                *self = OtaState::Idle(0);
+                return;
+            }
+
+            pos += slice.len();
         }
     }
 
@@ -226,19 +201,17 @@ impl OtaState {
             return;
         };
 
-        log::info!("OTA: finalizing ({} bytes written)...", w.received);
-
-        if let Some((first_offset, first_chunk)) = w.pending.take() {
-            let prev_remaining = w.total.saturating_sub(first_offset);
-            let prev_expected = (w.chunk_size as u32).min(prev_remaining) as usize;
-
-            if first_chunk.len() == prev_expected {
-                if !Self::write_chunk(w, first_offset, &first_chunk) {
-                    *self = OtaState::Idle(0);
-                    return;
-                }
-            }
+        if w.received != w.total {
+            log::error!(
+                "OTA END: incomplete — received {} of {} bytes — aborting",
+                w.received,
+                w.total
+            );
+            *self = OtaState::Idle(0);
+            return;
         }
+
+        log::info!("OTA: finalizing ({} bytes written)...", w.received);
 
         unsafe {
             let err = esp_ota_end(w.handle);
