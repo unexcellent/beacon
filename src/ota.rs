@@ -122,16 +122,25 @@ impl OtaState {
             return;
         }
 
-        // Strip any trailing relay bytes that exceed a whole number of chunks.
         // The relay may append 4 bytes (CRC without flag) and/or batch multiple
-        // consecutive OTA packets into one CSP frame.
+        // consecutive OTA packets into one CSP frame. Strip trailing bytes that
+        // are relay overhead: anything beyond the last complete chunk, unless the
+        // remaining firmware bytes are smaller than chunk_size (final chunk).
         let payload = if w.chunk_size > 0 {
             let cs = w.chunk_size as usize;
-            let n_chunks = raw.len() / cs;
-            if n_chunks > 0 {
-                &raw[..n_chunks * cs]
+            let remaining_total = w.total.saturating_sub(base_offset) as usize;
+            if remaining_total <= cs {
+                // Final chunk — take only the remaining firmware bytes.
+                let take = remaining_total.min(raw.len());
+                &raw[..take]
             } else {
-                raw
+                // Mid-transfer — strip to a whole number of full chunks.
+                let n_chunks = raw.len() / cs;
+                if n_chunks > 0 {
+                    &raw[..n_chunks * cs]
+                } else {
+                    raw
+                }
             }
         } else {
             raw
@@ -141,6 +150,9 @@ impl OtaState {
         while pos < payload.len() {
             let offset = base_offset + pos as u32;
             let remaining = w.total.saturating_sub(offset);
+            if remaining == 0 {
+                break;
+            }
             let expected = if w.chunk_size > 0 {
                 (w.chunk_size as u32).min(remaining) as usize
             } else {
