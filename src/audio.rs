@@ -182,7 +182,7 @@ impl AudioChannel {
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<(), EspError> {
+    pub fn flush(&mut self) -> Result<(), EspError> {
         let mut remaining = &self.buf[..self.buf_pos];
         while !remaining.is_empty() {
             let mut written = 0usize;

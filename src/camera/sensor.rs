@@ -38,6 +38,10 @@ impl CameraSensor {
         true
     }
 
+    pub(super) unsafe fn disable(&self, i2c_dev: i2c_master_dev_handle_t) -> bool {
+        self.write(i2c_dev, 0x0100, 0x00)
+    }
+
     unsafe fn write(&self, dev: i2c_master_dev_handle_t, reg: u16, val: u8) -> bool {
         let buf = [(reg >> 8) as u8, reg as u8, val];
         for attempt in 0..3u8 {

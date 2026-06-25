@@ -53,9 +53,9 @@ unsafe extern "C" fn on_trans_finished(
     false
 }
 
-struct InnerCamera {
-    csi: esp_cam_ctlr_handle_t,
-    i2c_dev: i2c_master_dev_handle_t,
+pub(super) struct InnerCamera {
+    pub(super) csi: esp_cam_ctlr_handle_t,
+    pub(super) i2c_dev: i2c_master_dev_handle_t,
 }
 
 impl InnerCamera {
@@ -73,7 +73,7 @@ const OUTPUT_HEIGHT: usize = sstv::Mode::Robot36.image_height() as usize;
 pub struct Camera {
     sensor: CameraSensor,
     capture_buffer: Box<CaptureBuffer>,
-    _inner: InnerCamera,
+    inner: InnerCamera,
     wb_r: f32,
     wb_b: f32,
 }
@@ -94,14 +94,27 @@ impl Camera {
                 wb_r: sensor.red_gain_seed,
                 wb_b: sensor.blue_gain_seed,
                 sensor,
-                _inner: inner,
+                inner,
                 capture_buffer,
             };
 
+            // Calibrate briefly to verify streaming works, then go to standby.
             cam.calibrate(3);
+            cam.deactivate();
 
             Ok(cam)
         }
+    }
+
+    /// Enable sensor streaming and wait for calibration frames to settle.
+    pub fn activate(&mut self) {
+        unsafe { self.sensor.enable(self.inner.i2c_dev); }
+        self.calibrate(3);
+    }
+
+    /// Put sensor into standby (stops streaming, saves power).
+    pub fn deactivate(&mut self) {
+        unsafe { self.sensor.disable(self.inner.i2c_dev); }
     }
 
     pub fn calibrate(&mut self, frames: u32) {

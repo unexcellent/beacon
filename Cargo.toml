@@ -33,6 +33,7 @@ esp-idf-sys = "0.37"
 esp-idf-hal = "0.46"
 esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
 sstv = { git = "https://github.com/unexcellent/sstv.git", branch = "main" }
+libcsp = { git = "https://github.com/xarantolus/libcsp_rust", rev = "16ba62b127ba431aa03516a1322592d257d37789", default-features = false, features = ["external-arch"] }
 
 [build-dependencies]
 embuild = "0.33"
