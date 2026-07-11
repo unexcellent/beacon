@@ -1,0 +1,5 @@
+#include "esp_cam_ctlr.h"
+#include "esp_cam_ctlr_types.h"
+#include "esp_cam_ctlr_csi.h"
+#include "driver/isp_core.h"
+#include "driver/isp_types.h"

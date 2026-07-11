@@ -19,6 +19,7 @@ panic = "immediate-abort"
 
 [profile.dev]
 debug = true
+strip = "debuginfo"
 opt-level = "z"
 
 [patch.crates-io]
@@ -29,9 +30,17 @@ esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git" }
 [dependencies]
 log = "0.4"
 esp-idf-sys = "0.37"
+esp-idf-hal = "0.46"
 esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
 sstv = { git = "https://github.com/unexcellent/sstv.git", branch = "main" }
+libcsp = { git = "https://github.com/xarantolus/libcsp_rust", rev = "16ba62b127ba431aa03516a1322592d257d37789", default-features = false, features = ["external-arch"] }
 
 [build-dependencies]
 embuild = "0.33"
-image = "0.25.1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[package.metadata.esp-idf-sys]
+extra_components = [
+    { bindings_header = "src/camera/bindings.h" },
+    { component_dirs = ["cmake_override/isp_patch"] }
+]

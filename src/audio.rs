@@ -91,6 +91,9 @@ pub const PHILLIPS_I2S: AudioInterface = AudioInterface {
 /// The underlying hardware channel is released automatically on drop.
 pub struct AudioChannel {
     inner: i2s_chan_handle_t,
+    left_channel: bool,
+    buf: Vec<u8>,
+    buf_pos: usize,
 }
 
 impl AudioChannel {
@@ -152,12 +155,35 @@ impl AudioChannel {
 
         unsafe { esp!(i2s_channel_init_std_mode(tx, &std_cfg))? };
 
-        Ok(Self { inner: tx })
+        let channel = Self {
+            inner: tx,
+            left_channel: encoder.left_channel,
+            buf: vec![0u8; interface.chunk_size * 4],
+            buf_pos: 0,
+        };
+        channel.enable()?;
+        Ok(channel)
     }
 
-    /// Writes all bytes in `data` to the I2S DMA buffer, blocking until complete.
-    pub fn transmit(&mut self, data: &[u8]) -> Result<(), EspError> {
-        let mut remaining = data;
+    /// Packs a mono 16-bit sample into the stereo I2S frame and writes to DMA when the
+    /// internal buffer is full.
+    pub fn transmit(&mut self, sample: i16) -> Result<(), EspError> {
+        let [lo, hi] = sample.to_le_bytes();
+        let (audio_off, silent_off) = if self.left_channel { (0, 2) } else { (2, 0) };
+        self.buf[self.buf_pos + audio_off]     = lo;
+        self.buf[self.buf_pos + audio_off + 1] = hi;
+        self.buf[self.buf_pos + silent_off]     = 0;
+        self.buf[self.buf_pos + silent_off + 1] = 0;
+        self.buf_pos += 4;
+
+        if self.buf_pos == self.buf.len() {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    pub fn flush(&mut self) -> Result<(), EspError> {
+        let mut remaining = &self.buf[..self.buf_pos];
         while !remaining.is_empty() {
             let mut written = 0usize;
             unsafe {
@@ -171,26 +197,26 @@ impl AudioChannel {
             }
             remaining = &remaining[written..];
         }
+        self.buf_pos = 0;
         Ok(())
     }
 
-    /// Disables the channel, stopping the I2S clocks and DMA transfer.
-    pub fn disable(&mut self) {
+    fn disable(&mut self) {
+        let _ = self.flush();
         unsafe {
             let _ = i2s_channel_disable(self.inner);
         }
     }
 
-    /// Enables the channel, starting the I2S clocks and allowing transmission.
-    pub fn enable(&mut self) -> Result<(), EspError> {
+    fn enable(&self) -> Result<(), EspError> {
         unsafe { esp!(i2s_channel_enable(self.inner)) }
     }
 }
 
 impl Drop for AudioChannel {
     fn drop(&mut self) {
+        self.disable();
         unsafe {
-            let _ = i2s_channel_disable(self.inner);
             let _ = i2s_del_channel(self.inner);
         }
     }
