@@ -1,13 +1,13 @@
 mod audio;
+#[allow(dead_code, unused_imports)] // retained for the RGB camera path; not used in the IR workflow
 mod camera;
 mod csp_arch;
 mod ota;
+mod thermal;
 
 use audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
-use camera::{Camera, MIPI, SC850SL};
-use sstv::{Encoder, Mode, Synthesizer};
-
-use crate::camera::Image;
+use sstv::{Encoder, Mode, RgbPixel, Synthesizer};
+use thermal::ThermalCamera;
 
 use esp_idf_hal::{
     delay,
@@ -238,10 +238,13 @@ fn send_status(uart: &UartDriver, node: &libcsp::CspNode, msg: &[u8]) {
 
 // ── SSTV helpers ──────────────────────────────────────────────────────────────
 
-fn transmit_sstv(
-    image: Image,
+fn transmit_sstv<I>(
+    image: I,
     audio: &mut AudioChannel,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    I: Iterator<Item = RgbPixel> + 'static,
+{
     log::info!("SSTV: encoding and transmitting...");
     let encoder = Encoder::new(Mode::Robot36, image)?;
     for sample in Synthesizer::new(encoder, PHILLIPS_I2S.sample_rate) {
@@ -301,9 +304,9 @@ fn main() {
         BAUD_RATE
     );
 
-    log::info!("Camera: initializing...");
-    let mut camera = Camera::new(SC850SL, MIPI).expect("camera init");
-    log::info!("Camera: ready (standby)");
+    log::info!("Thermal camera: initializing (MI1602 via MI48Dx)...");
+    let mut camera = ThermalCamera::new().expect("thermal camera init");
+    log::info!("Thermal camera: ready");
 
     let mut audio = AudioChannel::new(PCM5102A, PHILLIPS_I2S).expect("audio init");
 
@@ -360,12 +363,9 @@ fn main() {
                     log::info!("CMD: SSTV requested");
                     send_status(&uart, &node, b"BUSY");
 
-                    log::info!("Camera: activating...");
-                    camera.activate();
-
+                    log::info!("Thermal camera: capturing...");
                     let image = camera.capture();
-                    log::info!("Camera: picture taken, deactivating");
-                    camera.deactivate();
+                    log::info!("Thermal camera: frame captured");
 
                     if let Err(e) = transmit_sstv(image, &mut audio) {
                         log::error!("SSTV transmission failed: {e}");
