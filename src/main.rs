@@ -228,7 +228,7 @@ fn send_bytes(uart: &UartDriver, data: &[u8]) {
 fn send_status(uart: &UartDriver, node: &libcsp::CspNode, msg: &[u8]) {
     if let Some(mut pkt) = libcsp::Packet::get(0) {
         pkt.write(msg).ok();
-        node.sendto(libcsp::Priority::Norm, PAYLOAD_NODE, PAYLOAD_PORT, NODE as u8, 0, pkt);
+        node.sendto(libcsp::Priority::Norm, PAYLOAD_NODE, PAYLOAD_PORT, 0, 0, pkt);
     }
     let to_send: Vec<u8> = std::mem::take(&mut *TX_BUF.lock().unwrap());
     if !to_send.is_empty() {
@@ -284,6 +284,10 @@ fn main() {
         .expect("csp init");
 
     let iface = libcsp::interface::register(UartKissIface);
+    // Stamp our node address on packets leaving this interface. libcsp fills the
+    // source from `snd_iface->addr` when it is 0, and `register()` zero-inits it,
+    // so without this outgoing traffic (e.g. AVAILABLE) is sent from address 0.
+    unsafe { (*iface.c_iface_ptr()).addr = NODE };
     unsafe { libcsp::route::set_default(iface.c_iface_ptr()).expect("default route") };
 
     let mut ping_sock = libcsp::Socket::new(libcsp::socket_opts::NONE);
