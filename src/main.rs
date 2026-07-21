@@ -25,6 +25,9 @@ const OTA_PORT: u8 = 10;
 const CMD_PORT: u8 = 11;
 const PAYLOAD_NODE: u16 = 14;
 const PAYLOAD_PORT: u8 = 1;
+/// On-board computer: receives the boot status + firmware identity at startup.
+const OBC_NODE: u16 = 1;
+const OBC_PORT: u8 = 1;
 
 // ── KISS ──────────────────────────────────────────────────────────────────────
 
@@ -225,15 +228,34 @@ fn send_bytes(uart: &UartDriver, data: &[u8]) {
     uart.wait_tx_done(delay::BLOCK).unwrap();
 }
 
-fn send_status(uart: &UartDriver, node: &libcsp::CspNode, msg: &[u8]) {
+/// Send `msg` as a CSP packet to `dst`:`port`, then flush the KISS TX buffer.
+fn send_msg(uart: &UartDriver, node: &libcsp::CspNode, dst: u16, port: u8, msg: &[u8]) {
     if let Some(mut pkt) = libcsp::Packet::get(0) {
         pkt.write(msg).ok();
-        node.sendto(libcsp::Priority::Norm, PAYLOAD_NODE, PAYLOAD_PORT, 0, 0, pkt);
+        node.sendto(libcsp::Priority::Norm, dst, port, 0, 0, pkt);
     }
     let to_send: Vec<u8> = std::mem::take(&mut *TX_BUF.lock().unwrap());
     if !to_send.is_empty() {
         send_bytes(uart, &to_send);
     }
+}
+
+fn send_status(uart: &UartDriver, node: &libcsp::CspNode, msg: &[u8]) {
+    send_msg(uart, node, PAYLOAD_NODE, PAYLOAD_PORT, msg);
+}
+
+/// Firmware identity for ground validation: app version + ELF SHA-256 (hex).
+/// The SHA-256 is stamped into the image by the build, so it uniquely
+/// identifies the exact firmware binary currently running.
+fn firmware_id() -> String {
+    let desc = unsafe { &*esp_idf_svc::sys::esp_app_get_description() };
+    let version = unsafe { std::ffi::CStr::from_ptr(desc.version.as_ptr()) }.to_string_lossy();
+    let sha: String = desc
+        .app_elf_sha256
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("FW: {version} sha256={sha}")
 }
 
 // ── SSTV helpers ──────────────────────────────────────────────────────────────
@@ -304,6 +326,13 @@ fn main() {
         NODE,
         BAUD_RATE
     );
+
+    // Announce the boot to the OBC and report which firmware is running, so the
+    // ground can confirm the reboot and validate the deployed image (e.g. after OTA).
+    let fw = firmware_id();
+    log::info!("Boot: reporting to node {OBC_NODE} ({fw})");
+    send_msg(&uart, &node, OBC_NODE, OBC_PORT, b"STATUS: BOOTED");
+    send_msg(&uart, &node, OBC_NODE, OBC_PORT, fw.as_bytes());
 
     log::info!("Camera: initializing...");
     let mut camera = Camera::new(SC850SL, MIPI).expect("camera init");
