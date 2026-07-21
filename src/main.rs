@@ -2,12 +2,12 @@ mod audio;
 mod camera;
 mod csp_arch;
 mod ota;
+mod thermal;
 
 use audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
 use camera::{Camera, MIPI, SC850SL};
-use sstv::{Encoder, Mode, Synthesizer};
-
-use crate::camera::Image;
+use sstv::{Encoder, Mode, RgbPixel, Synthesizer};
+use thermal::ThermalCamera;
 
 use esp_idf_hal::{
     delay,
@@ -260,10 +260,12 @@ fn firmware_id() -> String {
 
 // ── SSTV helpers ──────────────────────────────────────────────────────────────
 
-fn transmit_sstv(
-    image: Image,
-    audio: &mut AudioChannel,
-) -> Result<(), Box<dyn std::error::Error>> {
+/// Encode any RGB pixel stream (RGB camera or false-coloured thermal) as Robot36
+/// SSTV and play it out over the audio channel.
+fn transmit_sstv<I>(image: I, audio: &mut AudioChannel) -> Result<(), Box<dyn std::error::Error>>
+where
+    I: Iterator<Item = RgbPixel> + 'static,
+{
     log::info!("SSTV: encoding and transmitting...");
     let encoder = Encoder::new(Mode::Robot36, image)?;
     for sample in Synthesizer::new(encoder, PHILLIPS_I2S.sample_rate) {
@@ -272,6 +274,46 @@ fn transmit_sstv(
     audio.flush()?;
     log::info!("SSTV: transmission complete");
     Ok(())
+}
+
+/// Handle one SSTV command: calibrate both cameras, capture a frame with each as
+/// close together in time as the single-threaded flow allows, then transmit the RGB
+/// image, wait 5 s, and transmit the infrared image. Status is framed BUSY→AVAILABLE.
+fn capture_and_transmit_both(
+    uart: &UartDriver,
+    node: &libcsp::CspNode,
+    camera: &mut Camera,
+    thermal: &mut ThermalCamera,
+    audio: &mut AudioChannel,
+) {
+    send_status(uart, node, b"BUSY");
+
+    // Calibrate + capture both back-to-back. camera.activate() streams and runs
+    // calibration frames so the RGB capture is instant; the thermal capture then
+    // warms up its on-chip filters and averages several frames for noise reduction.
+    log::info!("RGB camera: activating + calibrating...");
+    camera.activate();
+    let rgb = camera.capture();
+    log::info!("Thermal camera: capturing (averaged)...");
+    let ir = thermal.capture();
+    camera.deactivate();
+    log::info!("Both frames captured");
+
+    log::info!("SSTV: transmitting RGB image...");
+    if let Err(e) = transmit_sstv(rgb, audio) {
+        log::error!("RGB SSTV transmission failed: {e}");
+    }
+
+    log::info!("Waiting 5 s before the infrared transmission...");
+    delay::FreeRtos::delay_ms(5_000);
+
+    log::info!("SSTV: transmitting infrared image...");
+    if let Err(e) = transmit_sstv(ir, audio) {
+        log::error!("IR SSTV transmission failed: {e}");
+    }
+
+    send_status(uart, node, b"AVAILABLE");
+    log::info!("Both images sent, waiting for commands");
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -334,9 +376,13 @@ fn main() {
     send_msg(&uart, &node, OBC_NODE, OBC_PORT, b"STATUS: BOOTED");
     send_msg(&uart, &node, OBC_NODE, OBC_PORT, fw.as_bytes());
 
-    log::info!("Camera: initializing...");
+    log::info!("RGB camera: initializing...");
     let mut camera = Camera::new(SC850SL, MIPI).expect("camera init");
-    log::info!("Camera: ready (standby)");
+    log::info!("RGB camera: ready (standby)");
+
+    log::info!("Thermal camera: initializing (MI1602 via MI48Dx)...");
+    let mut thermal = ThermalCamera::new().expect("thermal camera init");
+    log::info!("Thermal camera: ready");
 
     let mut audio = AudioChannel::new(PCM5102A, PHILLIPS_I2S).expect("audio init");
 
@@ -391,21 +437,13 @@ fn main() {
             while let Some(pkt) = conn.read(0) {
                 if pkt.data().starts_with(b"SSTV") {
                     log::info!("CMD: SSTV requested");
-                    send_status(&uart, &node, b"BUSY");
-
-                    log::info!("Camera: activating...");
-                    camera.activate();
-
-                    let image = camera.capture();
-                    log::info!("Camera: picture taken, deactivating");
-                    camera.deactivate();
-
-                    if let Err(e) = transmit_sstv(image, &mut audio) {
-                        log::error!("SSTV transmission failed: {e}");
-                    }
-
-                    send_status(&uart, &node, b"AVAILABLE");
-                    log::info!("Sent AVAILABLE, waiting for commands");
+                    capture_and_transmit_both(
+                        &uart,
+                        &node,
+                        &mut camera,
+                        &mut thermal,
+                        &mut audio,
+                    );
                 } else {
                     log::warn!("CMD: unknown payload: {}", fmt_payload(pkt.data()));
                 }
