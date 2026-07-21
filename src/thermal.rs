@@ -18,7 +18,8 @@
 //! out the temperature frame from the Output Frame Buffer when `DATA_READY` is high.
 //!
 //! Each pixel read back is a 16-bit unsigned temperature in units of 0.1 K.
-//! We normalise the frame to its own min/max, false-colour it and nearest-neighbour
+//! We average several frames to suppress random per-pixel noise, normalise to a
+//! robust (percentile-clipped) range, map to greyscale and nearest-neighbour
 //! upscale the 160×120 array to the 320×240 grid expected by Robot36 SSTV.
 
 use core::ffi::c_void;
@@ -108,8 +109,12 @@ const BOOT_SETTLE_MS: u64 = 2_000;
 /// MI1602_BOOT_TIMEOUT_MS. pysenxor polls with no timeout at all; 3 s is a safe bound.
 const BOOT_TIMEOUT_MS: u32 = 3_000;
 /// Single-shot frames to capture and discard so the on-chip temporal/median filters (which
-/// keep state across captures) converge before the frame we actually keep.
+/// keep state across captures) converge before the frames we actually keep.
 const WARMUP_FRAMES: u32 = 5;
+/// Frames to capture and average after warm-up. Random per-pixel sensor noise is
+/// uncorrelated between frames, so averaging N frames cuts its amplitude by ~√N —
+/// the main lever against the salt-and-pepper speckle in a single raw frame.
+const AVERAGE_FRAMES: u32 = 8;
 /// Per-frame timeout waiting for DATA_READY, matching the reference's
 /// MI1602_DATA_READY_TIMEOUT_MS. Real frames arrive in tens of ms.
 const FRAME_TIMEOUT_MS: u32 = 2_000;
@@ -160,38 +165,61 @@ impl ThermalCamera {
         }
     }
 
-    /// Capture a short warm-up burst of single-shot frames so the on-chip filters settle,
-    /// then keep the last one and turn it into a false-coloured, upscaled SSTV image.
+    /// Capture a short warm-up burst so the on-chip filters settle, then average several
+    /// frames to suppress noise and turn the result into a greyscale, upscaled SSTV image.
     pub fn capture(&mut self) -> ThermalImage {
         unsafe {
-            // Trigger one frame at a time (header stripped → pure pixel data), exactly like
-            // the reference's single-capture path. The MI48Dx keeps its filter state across
-            // captures, so repeating this converges the filters before we keep a frame.
-            let mut got_frame = false;
-            for i in 0..WARMUP_FRAMES {
-                let _ =
-                    self.write_reg(REG_FRAME_MODE, FRAME_MODE_SINGLE_FRAME | FRAME_MODE_NO_HEADER);
-                if self.wait_for_data_ready(FRAME_TIMEOUT_MS) {
-                    self.read_frame();
-                    got_frame = true;
-                } else {
-                    let status = match self.read_reg(REG_STATUS) {
-                        Ok(s) => format!("0x{s:02x}"),
-                        Err(e) => err_name(e).to_string(),
-                    };
-                    // Leave the chip idle so the next trigger starts clean.
-                    let _ = self.write_reg(REG_FRAME_MODE, 0x00);
-                    log::warn!(
-                        "MI48: frame {i} timed out waiting for DATA_READY (STATUS={status})"
-                    );
+            // Warm-up: converge the on-chip temporal/median filters (frames discarded). The
+            // MI48Dx keeps its filter state across single-shot captures, so this settles it.
+            for _ in 0..WARMUP_FRAMES {
+                self.capture_one();
+            }
+
+            // Average AVERAGE_FRAMES frames per pixel. Random sensor noise is uncorrelated
+            // between frames, so the mean converges to the true temperature while the noise
+            // shrinks by ~√N — this is what kills the salt-and-pepper speckle.
+            let mut acc = vec![0u32; FRAME_WORDS];
+            let mut n = 0u32;
+            for _ in 0..AVERAGE_FRAMES {
+                if self.capture_one() {
+                    for (i, slot) in acc.iter_mut().enumerate() {
+                        *slot += self.word(i) as u32;
+                    }
+                    n += 1;
                 }
             }
 
-            if !got_frame {
+            if n == 0 {
                 log::error!("MI48: no frame captured — transmitting a blank image");
+                return build_image(&vec![0u16; FRAME_WORDS]);
             }
-            self.build_image()
+            let averaged: Vec<u16> = acc.iter().map(|&s| (s / n) as u16).collect();
+            build_image(&averaged)
         }
+    }
+
+    /// Trigger and read exactly one single-shot frame into `rx_buf`. Header stripped
+    /// (NO_HEADER) → pure pixel data. Returns false (and leaves the chip idle) on timeout.
+    unsafe fn capture_one(&self) -> bool {
+        let _ = self.write_reg(REG_FRAME_MODE, FRAME_MODE_SINGLE_FRAME | FRAME_MODE_NO_HEADER);
+        if self.wait_for_data_ready(FRAME_TIMEOUT_MS) {
+            self.read_frame();
+            true
+        } else {
+            let status = match self.read_reg(REG_STATUS) {
+                Ok(s) => format!("0x{s:02x}"),
+                Err(e) => err_name(e).to_string(),
+            };
+            // Leave the chip idle so the next trigger starts clean.
+            let _ = self.write_reg(REG_FRAME_MODE, 0x00);
+            log::warn!("MI48: frame timed out waiting for DATA_READY (STATUS={status})");
+            false
+        }
+    }
+
+    /// Read pixel `i` from `rx_buf`. Words are 16-bit, MSB byte first on the wire.
+    unsafe fn word(&self, i: usize) -> u16 {
+        ((*self.rx_buf.add(2 * i) as u16) << 8) | (*self.rx_buf.add(2 * i + 1) as u16)
     }
 
     // ── Setup ──────────────────────────────────────────────────────────────────────
@@ -465,35 +493,6 @@ impl ThermalCamera {
         gpio_set_level(PIN_CS as gpio_num_t, 1);
     }
 
-    /// Turn the raw frame in `rx_buf` into a false-coloured, 2×-upscaled SSTV image.
-    unsafe fn build_image(&self) -> ThermalImage {
-        // Words are 16-bit, MSB byte first on the wire.
-        let word = |i: usize| -> u16 {
-            ((*self.rx_buf.add(2 * i) as u16) << 8) | (*self.rx_buf.add(2 * i + 1) as u16)
-        };
-
-        // Auto-scale the palette to this frame's own temperature range.
-        let mut min = u16::MAX;
-        let mut max = 0u16;
-        for i in 0..FRAME_WORDS {
-            let v = word(i);
-            min = min.min(v);
-            max = max.max(v);
-        }
-        let range = (max.saturating_sub(min)).max(1) as f32;
-
-        let mut pixels = Vec::with_capacity(OUT_WIDTH * OUT_HEIGHT);
-        for oy in 0..OUT_HEIGHT {
-            let sy = oy * THERMAL_HEIGHT / OUT_HEIGHT;
-            for ox in 0..OUT_WIDTH {
-                let sx = ox * THERMAL_WIDTH / OUT_WIDTH;
-                let v = word(sy * THERMAL_WIDTH + sx);
-                let norm = v.saturating_sub(min) as f32 / range;
-                pixels.push(colorize(norm));
-            }
-        }
-        ThermalImage { pixels, index: 0 }
-    }
 }
 
 impl Drop for ThermalCamera {
@@ -507,6 +506,18 @@ impl Drop for ThermalCamera {
 pub struct ThermalImage {
     pixels: Vec<RgbPixel>,
     index: usize,
+}
+
+impl ThermalImage {
+    /// SSTV output grid width in pixels (constant: 2× the sensor).
+    pub fn width(&self) -> usize {
+        OUT_WIDTH
+    }
+
+    /// SSTV output grid height in pixels (constant: 2× the sensor).
+    pub fn height(&self) -> usize {
+        OUT_HEIGHT
+    }
 }
 
 impl Iterator for ThermalImage {
@@ -528,25 +539,34 @@ fn err_name(code: esp_err_t) -> &'static str {
     }
 }
 
-/// Map a normalised temperature in `[0, 1]` to an ironbow-style false colour
-/// (black → purple → red → orange → white).
-fn colorize(t: f32) -> RgbPixel {
-    const STOPS: [(f32, (u8, u8, u8)); 5] = [
-        (0.00, (0, 0, 0)),
-        (0.25, (60, 10, 120)),
-        (0.50, (200, 40, 70)),
-        (0.75, (255, 150, 10)),
-        (1.00, (255, 255, 255)),
-    ];
-    let t = t.clamp(0.0, 1.0);
-    for w in STOPS.windows(2) {
-        let (t0, c0) = w[0];
-        let (t1, c1) = w[1];
-        if t <= t1 {
-            let f = (t - t0) / (t1 - t0);
-            let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * f) as u8;
-            return RgbPixel::new(lerp(c0.0, c1.0), lerp(c0.1, c1.1), lerp(c0.2, c1.2));
+/// Turn an averaged 160×120 temperature frame into a greyscale, 2×-upscaled SSTV image.
+fn build_image(words: &[u16]) -> ThermalImage {
+    // Robust auto-scale: clip the coldest and hottest ~1% of pixels before choosing the
+    // black/white points. A few outlier/noisy pixels would otherwise stretch the whole
+    // range and wash the low-contrast scene out into amplified noise.
+    let mut sorted = words.to_vec();
+    sorted.sort_unstable();
+    let trim = sorted.len() / 100;
+    let min = sorted[trim];
+    let max = sorted[sorted.len() - 1 - trim];
+    let range = (max.saturating_sub(min)).max(1) as f32;
+
+    let mut pixels = Vec::with_capacity(OUT_WIDTH * OUT_HEIGHT);
+    for oy in 0..OUT_HEIGHT {
+        let sy = oy * THERMAL_HEIGHT / OUT_HEIGHT;
+        for ox in 0..OUT_WIDTH {
+            let sx = ox * THERMAL_WIDTH / OUT_WIDTH;
+            let v = words[sy * THERMAL_WIDTH + sx];
+            let norm = v.saturating_sub(min) as f32 / range;
+            pixels.push(grayscale(norm));
         }
     }
-    RgbPixel::new(255, 255, 255)
+    ThermalImage { pixels, index: 0 }
+}
+
+/// Map a normalised temperature in `[0, 1]` to a greyscale pixel
+/// (black = coldest, white = hottest).
+fn grayscale(t: f32) -> RgbPixel {
+    let g = (t.clamp(0.0, 1.0) * 255.0) as u8;
+    RgbPixel::new(g, g, g)
 }

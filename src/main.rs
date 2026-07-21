@@ -2,10 +2,12 @@ mod audio;
 #[allow(dead_code, unused_imports)] // retained for the RGB camera path; not used in the IR workflow
 mod camera;
 mod csp_arch;
+mod debug;
 mod ota;
 mod thermal;
 
 use audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
+use debug::DebugChannel;
 use sstv::{Encoder, Mode, RgbPixel, Synthesizer};
 use thermal::ThermalCamera;
 
@@ -307,6 +309,17 @@ fn main() {
     log::info!("Thermal camera: initializing (MI1602 via MI48Dx)...");
     let mut camera = ThermalCamera::new().expect("thermal camera init");
     log::info!("Thermal camera: ready");
+
+    // Boot-time frame dump over the USB-C (USB-JTAG) serial link. The reset that
+    // follows a flash boots this app, and this send IS the capture trigger that
+    // local/capture_frame_via_usb_c.sh waits for — no command needed, matching the
+    // mipi branch's auto-send-on-boot behaviour.
+    let debug = DebugChannel::new();
+    log::info!("Boot: capturing thermal frame for USB-C debug dump...");
+    let boot_frame = camera.capture();
+    if let Err(e) = debug.send_image(boot_frame.width(), boot_frame.height(), boot_frame) {
+        log::error!("Debug frame send failed: {e}");
+    }
 
     let mut audio = AudioChannel::new(PCM5102A, PHILLIPS_I2S).expect("audio init");
 
