@@ -79,8 +79,11 @@ unsafe fn raw10_pixel(row: *const u8, x: usize) -> u32 {
     *row.add((x >> 2) * 5 + (x & 3)) as u32
 }
 
-// Box-filter the Bayer source region that maps to output pixel (dx, dy),
-// returning per-channel averages as floats.
+// Box-filter the Bayer source region that maps to output pixel (dx, dy), returning
+// per-channel averages. The source is rotated 90° counter-clockwise and cropped to
+// fill the output undistorted: output x scans full source rows, output y scans a
+// centred crop of source columns (reversed, which makes the rotation counter-clockwise).
+// Demosaic parity uses the real source (sy, sx), so RGGB reconstruction stays correct.
 unsafe fn sample_bayer_region(
     src: *const u8,
     src_width: usize,
@@ -89,14 +92,23 @@ unsafe fn sample_bayer_region(
     dx: usize,
     dy: usize,
 ) -> (f32, f32, f32) {
-    let sy0 = (dy * src_height) / OUTPUT_HEIGHT;
-    let sy1 = (((dy + 1) * src_height) / OUTPUT_HEIGHT)
+    // Keep the centred span of source columns whose width, once the full source height
+    // maps to the output width, gives the output's aspect ratio — i.e. crop-to-fill.
+    let kept = OUTPUT_HEIGHT * src_height / OUTPUT_WIDTH;
+    let crop_lo = (src_width - kept) / 2;
+
+    // output x → source rows (full height)
+    let sy0 = (dx * src_height) / OUTPUT_WIDTH;
+    let sy1 = (((dx + 1) * src_height) / OUTPUT_WIDTH)
         .max(sy0 + 2)
         .min(src_height);
-    let sx0 = (dx * src_width) / OUTPUT_WIDTH;
-    let sx1 = (((dx + 1) * src_width) / OUTPUT_WIDTH)
-        .max(sx0 + 2)
+    // output y → source columns (centred crop), reversed for counter-clockwise
+    let c0 = crop_lo + (dy * kept) / OUTPUT_HEIGHT;
+    let c1 = (crop_lo + ((dy + 1) * kept) / OUTPUT_HEIGHT)
+        .max(c0 + 2)
         .min(src_width);
+    let sx0 = src_width - c1;
+    let sx1 = src_width - c0;
 
     let mut sr = 0u32; let mut cr = 0u32;
     let mut sg = 0u32; let mut cg = 0u32;
