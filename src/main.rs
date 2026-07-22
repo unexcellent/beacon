@@ -1,13 +1,15 @@
 mod audio;
 mod camera;
 mod csp_arch;
+mod debug;
 mod ota;
 mod thermal;
 
 use audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
-use camera::{Camera, MIPI, SC850SL};
+use camera::{Camera, Image, MIPI, SC850SL};
+use debug::DebugChannel;
 use sstv::{Encoder, Mode, RgbPixel, Synthesizer};
-use thermal::ThermalCamera;
+use thermal::{ThermalCamera, ThermalImage};
 
 use esp_idf_hal::{
     delay,
@@ -276,9 +278,23 @@ where
     Ok(())
 }
 
-/// Handle one SSTV command: calibrate both cameras, capture a frame with each as
-/// close together in time as the single-threaded flow allows, then transmit the RGB
-/// image, wait 5 s, and transmit the infrared image. Status is framed BUSY→AVAILABLE.
+/// Calibrate both cameras and capture one frame with each as close together in time
+/// as the single-threaded flow allows. `camera.activate()` streams and runs calibration
+/// frames so the RGB capture is instant; the thermal capture then warms up its on-chip
+/// filters and averages several frames for noise reduction. Returns (RGB, infrared).
+fn capture_both(camera: &mut Camera, thermal: &mut ThermalCamera) -> (Image, ThermalImage) {
+    log::info!("RGB camera: activating + calibrating...");
+    camera.activate();
+    let rgb = camera.capture();
+    camera.deactivate();
+    log::info!("Thermal camera: capturing (averaged)...");
+    let ir = thermal.capture();
+    log::info!("Both frames captured");
+    (rgb, ir)
+}
+
+/// Handle one SSTV command: capture both cameras, then transmit the RGB image,
+/// wait 5 s, and transmit the infrared image. Status is framed BUSY→AVAILABLE.
 fn capture_and_transmit_both(
     uart: &UartDriver,
     node: &libcsp::CspNode,
@@ -288,16 +304,7 @@ fn capture_and_transmit_both(
 ) {
     send_status(uart, node, b"BUSY");
 
-    // Calibrate + capture both back-to-back. camera.activate() streams and runs
-    // calibration frames so the RGB capture is instant; the thermal capture then
-    // warms up its on-chip filters and averages several frames for noise reduction.
-    log::info!("RGB camera: activating + calibrating...");
-    camera.activate();
-    let rgb = camera.capture();
-    log::info!("Thermal camera: capturing (averaged)...");
-    let ir = thermal.capture();
-    camera.deactivate();
-    log::info!("Both frames captured");
+    let (rgb, ir) = capture_both(camera, thermal);
 
     log::info!("SSTV: transmitting RGB image...");
     if let Err(e) = transmit_sstv(rgb, audio) {
@@ -314,6 +321,23 @@ fn capture_and_transmit_both(
 
     send_status(uart, node, b"AVAILABLE");
     log::info!("Both images sent, waiting for commands");
+}
+
+/// Debug path (USB-C trigger): capture both cameras exactly like the SSTV command,
+/// then stream both frames over the USB-C serial link, each tagged with its camera
+/// name, for local/capture_frame_via_usb_c.sh to save.
+fn capture_and_dump_usb(debug: &DebugChannel, camera: &mut Camera, thermal: &mut ThermalCamera) {
+    let (rgb, ir) = capture_both(camera, thermal);
+
+    log::info!("USB-C: sending RGB frame...");
+    if let Err(e) = debug.send_image("rgb", rgb.width(), rgb.height(), rgb) {
+        log::error!("USB-C RGB frame send failed: {e}");
+    }
+    log::info!("USB-C: sending thermal frame...");
+    if let Err(e) = debug.send_image("thermal", ir.width(), ir.height(), ir) {
+        log::error!("USB-C thermal frame send failed: {e}");
+    }
+    log::info!("USB-C: both frames sent");
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -386,15 +410,27 @@ fn main() {
 
     let mut audio = AudioChannel::new(PCM5102A, PHILLIPS_I2S).expect("audio init");
 
+    // USB-C debug link: lets a host trigger a two-camera capture and receive both
+    // frames over the serial console (see local/capture_frame_via_usb_c.sh).
+    let mut debug = DebugChannel::new();
+
     send_status(&uart, &node, b"AVAILABLE");
     log::info!("Sent AVAILABLE, waiting for commands");
 
     let mut kiss = KissDecoder::new();
     let mut ota = ota::OtaState::new();
     let mut buf = [0u8; 512];
+    // Poll the RS485 read with a short timeout (rather than blocking forever) so the
+    // loop also gets to service the USB-C debug trigger each iteration.
+    let read_timeout = delay::TickType::new_millis(100).ticks();
 
     loop {
-        if let Ok(n) = uart.read(&mut buf, delay::BLOCK) {
+        if debug.poll_trigger() {
+            log::info!("USB-C: capture trigger received");
+            capture_and_dump_usb(&debug, &mut camera, &mut thermal);
+        }
+
+        if let Ok(n) = uart.read(&mut buf, read_timeout) {
             for &b in &buf[..n] {
                 if let Some(frame) = kiss.push(b) {
                     if let Some(pkt) = frame_to_packet(&frame) {

@@ -201,7 +201,13 @@ impl ThermalCamera {
     /// Trigger and read exactly one single-shot frame into `rx_buf`. Header stripped
     /// (NO_HEADER) → pure pixel data. Returns false (and leaves the chip idle) on timeout.
     unsafe fn capture_one(&self) -> bool {
-        let _ = self.write_reg(REG_FRAME_MODE, FRAME_MODE_SINGLE_FRAME | FRAME_MODE_NO_HEADER);
+        // Surface a failed trigger write: if this I²C write does not land, the MI48Dx is
+        // never told to capture, so DATA_READY can never assert. Logging it distinguishes
+        // "trigger didn't reach the chip" from "chip triggered but produced no frame".
+        if let Err(e) = self.write_reg(REG_FRAME_MODE, FRAME_MODE_SINGLE_FRAME | FRAME_MODE_NO_HEADER)
+        {
+            log::warn!("MI48: FRAME_MODE trigger write failed: {}", err_name(e));
+        }
         if self.wait_for_data_ready(FRAME_TIMEOUT_MS) {
             self.read_frame();
             true
