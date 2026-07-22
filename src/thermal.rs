@@ -545,7 +545,8 @@ fn err_name(code: esp_err_t) -> &'static str {
     }
 }
 
-/// Turn an averaged 160×120 temperature frame into a greyscale, 2×-upscaled SSTV image.
+/// Turn an averaged 160×120 temperature frame into a greyscale, 2×-upscaled SSTV image,
+/// flipped horizontally to match the RGB camera's orientation.
 fn build_image(words: &[u16]) -> ThermalImage {
     // Robust auto-scale: clip the coldest and hottest ~1% of pixels before choosing the
     // black/white points. A few outlier/noisy pixels would otherwise stretch the whole
@@ -565,7 +566,8 @@ fn build_image(words: &[u16]) -> ThermalImage {
             let pixel = if crate::camera::watermark::is_white_at(ox, oy) {
                 RgbPixel::new(255, 255, 255)
             } else {
-                let sx = ox * THERMAL_WIDTH / OUT_WIDTH;
+                // Mirror left↔right (flip horizontally) so the scene matches the RGB image.
+                let sx = (THERMAL_WIDTH - 1) - (ox * THERMAL_WIDTH / OUT_WIDTH);
                 let v = words[sy * THERMAL_WIDTH + sx];
                 let norm = v.saturating_sub(min) as f32 / range;
                 grayscale(norm)
