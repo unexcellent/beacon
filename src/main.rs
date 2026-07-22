@@ -294,7 +294,8 @@ fn capture_both(camera: &mut Camera, thermal: &mut ThermalCamera) -> (Image, The
 }
 
 /// Handle one SSTV command: capture both cameras, then transmit the RGB image,
-/// wait 5 s, and transmit the infrared image. Status is framed BUSY→AVAILABLE.
+/// wait 5 s, and transmit the infrared image. Each transmission is framed by its own
+/// BUSY→AVAILABLE status, so the gap between RGB and IR reports AVAILABLE.
 fn capture_and_transmit_both(
     uart: &UartDriver,
     node: &libcsp::CspNode,
@@ -311,8 +312,12 @@ fn capture_and_transmit_both(
         log::error!("RGB SSTV transmission failed: {e}");
     }
 
+    // Signal AVAILABLE during the gap between the two transmissions, then BUSY again
+    // before the infrared one so the status tracks each individual transmission.
+    send_status(uart, node, b"AVAILABLE");
     log::info!("Waiting 5 s before the infrared transmission...");
     delay::FreeRtos::delay_ms(5_000);
+    send_status(uart, node, b"BUSY");
 
     log::info!("SSTV: transmitting infrared image...");
     if let Err(e) = transmit_sstv(ir, audio) {
