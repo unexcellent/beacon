@@ -561,10 +561,16 @@ fn build_image(words: &[u16]) -> ThermalImage {
     for oy in 0..OUT_HEIGHT {
         let sy = oy * THERMAL_HEIGHT / OUT_HEIGHT;
         for ox in 0..OUT_WIDTH {
-            let sx = ox * THERMAL_WIDTH / OUT_WIDTH;
-            let v = words[sy * THERMAL_WIDTH + sx];
-            let norm = v.saturating_sub(min) as f32 / range;
-            pixels.push(grayscale(norm));
+            // Overlay the shared MOVE-IIIa watermark (same position as the RGB image).
+            let pixel = if crate::camera::watermark::is_white_at(ox, oy) {
+                RgbPixel::new(255, 255, 255)
+            } else {
+                let sx = ox * THERMAL_WIDTH / OUT_WIDTH;
+                let v = words[sy * THERMAL_WIDTH + sx];
+                let norm = v.saturating_sub(min) as f32 / range;
+                grayscale(norm)
+            };
+            pixels.push(pixel);
         }
     }
     ThermalImage { pixels, index: 0 }

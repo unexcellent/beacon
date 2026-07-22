@@ -3,7 +3,7 @@
 mod image;
 mod interface;
 mod sensor;
-mod watermark;
+pub(crate) mod watermark;
 
 use core::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
