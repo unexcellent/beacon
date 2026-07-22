@@ -70,12 +70,26 @@ impl InnerCamera {
 const OUTPUT_WIDTH: usize = sstv::Mode::Robot36.image_width() as usize;
 const OUTPUT_HEIGHT: usize = sstv::Mode::Robot36.image_height() as usize;
 
+// Auto-exposure tuning. Metering works in the 8-bit MSB space (0..255) on the high percentile
+// of the frame (see image::meter) rather than the mean, so bimodal orbit scenes meter sanely.
+const AE_TARGET_LUMA: f32 = 230.0; // drive the high percentile to just below saturation
+const AE_LUMA_LOW: f32 = 205.0; // converged band (lower bound)
+const AE_LUMA_HIGH: f32 = 248.0; // converged band (upper bound)
+const AE_CLIP_LIMIT: f32 = 0.02; // tolerate up to 2% near-saturated pixels
+const AE_HL_SCALE: f32 = 0.7; // forced exposure cut per step while highlights clip
+const AE_GAIN_MAX: f32 = 48.0; // analog-gain ceiling (sensor table tops out ~49.6x)
+const AE_MAX_ITERS: u32 = 6; // frame budget for convergence
+
 pub struct Camera {
     sensor: CameraSensor,
     capture_buffer: Box<CaptureBuffer>,
     inner: InnerCamera,
     wb_r: f32,
     wb_b: f32,
+    /// Current sensor integration time in lines (AE state, persists across activations).
+    exposure: u32,
+    /// Current analog gain as a linear multiplier (1.0 = unity).
+    gain: f32,
 }
 
 impl Camera {
@@ -93,6 +107,8 @@ impl Camera {
             let mut cam = Self {
                 wb_r: sensor.red_gain_seed,
                 wb_b: sensor.blue_gain_seed,
+                exposure: sensor.default_exposure as u32,
+                gain: 1.0,
                 sensor,
                 inner,
                 capture_buffer,
@@ -106,10 +122,73 @@ impl Camera {
         }
     }
 
-    /// Enable sensor streaming and wait for calibration frames to settle.
+    /// Enable sensor streaming and converge auto-exposure before the next capture.
     pub fn activate(&mut self) {
         unsafe { self.sensor.enable(self.inner.i2c_dev); }
-        self.calibrate(3);
+        self.auto_expose();
+    }
+
+    /// Closed-loop auto-exposure: meter the raw frame and drive the sensor's integration
+    /// time (and analog gain, only once exposure saturates) so bright scenes stop clipping.
+    ///
+    /// Exposure is the primary lever and is preferred all the way to its ceiling before any
+    /// gain is added, since gain only amplifies noise. Highlight-priority metering forces a
+    /// cut whenever a bright source clips, independent of the average brightness.
+    fn auto_expose(&mut self) {
+        for i in 0..AE_MAX_ITERS {
+            self.wait_for_frame();
+            let (p_high, clip) = unsafe {
+                image::meter(
+                    self.capture_buffer.buf as *const u8,
+                    self.sensor.resolution.0,
+                    self.sensor.resolution.1,
+                    self.capture_buffer.row_bytes(),
+                )
+            };
+
+            let converged =
+                clip <= AE_CLIP_LIMIT && p_high >= AE_LUMA_LOW && p_high <= AE_LUMA_HIGH;
+            log::info!(
+                "AE iter {i}: p95={p_high:.0} clip={:.1}% exp={} gain={:.2}x -> {}",
+                clip * 100.0,
+                self.exposure,
+                self.gain,
+                if converged { "converged" } else { "adjust" }
+            );
+            if converged {
+                return;
+            }
+
+            // Desired multiplicative change in total light. Clipping forces a reduction even
+            // if the percentile looks fine (a small, very bright spot in an otherwise dim scene).
+            let luma_scale = AE_TARGET_LUMA / p_high.max(1.0);
+            let scale = if clip > AE_CLIP_LIMIT {
+                luma_scale.min(AE_HL_SCALE)
+            } else {
+                luma_scale
+            };
+
+            // Distribute the change over exposure (preferred) then gain.
+            let max_exp = self.sensor.max_exposure() as f32;
+            let light = self.exposure as f32 * self.gain;
+            let desired = (light * scale).clamp(1.0, max_exp * AE_GAIN_MAX);
+            let (exp, gain) = if desired <= max_exp {
+                (desired.max(1.0), 1.0)
+            } else {
+                (max_exp, (desired / max_exp).min(AE_GAIN_MAX))
+            };
+            self.exposure = exp.round() as u32;
+            self.gain = gain;
+
+            unsafe {
+                self.sensor.set_exposure(self.inner.i2c_dev, self.exposure);
+                self.sensor.set_analog_gain(self.inner.i2c_dev, self.gain);
+            }
+
+            // Let the new exposure/gain take effect (applied on the next frame) before re-metering.
+            self.wait_for_frame();
+            self.wait_for_frame();
+        }
     }
 
     /// Put sensor into standby (stops streaming, saves power).

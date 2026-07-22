@@ -12,6 +12,10 @@ pub struct CameraSensor {
     pub red_gain_seed: f32,
     /// Initial white-balance blue gain seed (green = 1.0 reference).
     pub blue_gain_seed: f32,
+    /// Frame length in lines (VTS, regs 0x320e/0x320f). Bounds the exposure time.
+    pub vts: u16,
+    /// Exposure integration time in lines from the init table (starting point for AE).
+    pub default_exposure: u16,
     /// Register init table: (address, value) pairs written over I2C at startup.
     pub init_table: &'static [(u16, u8)],
     /// Register addresses that require a 20 ms delay after writing (e.g., PLL latching regs).
@@ -42,6 +46,40 @@ impl CameraSensor {
         self.write(i2c_dev, 0x0100, 0x00)
     }
 
+    /// Largest exposure (in lines) the sensor will accept: VTS minus a small guard band
+    /// (datasheet limit is VTS-4; we keep a couple of extra lines of margin).
+    pub(super) fn max_exposure(&self) -> u32 {
+        (self.vts as u32).saturating_sub(8).max(1)
+    }
+
+    /// Set the linear-mode integration time in lines.
+    ///
+    /// The SC850SL exposure field is a 20-bit value spread over three registers, in units
+    /// of 1/16 line: {0x3e00[3:0], 0x3e01[7:0], 0x3e02[7:4]} == lines << 4. Equivalently we
+    /// write the 16-bit line count as 0x3e00=[15:12], 0x3e01=[11:4], 0x3e02=[3:0]<<4.
+    /// (Packing per SmartSens datasheet V1.10 / MOVE-IIIa cmos_inttime_update.)
+    pub(super) unsafe fn set_exposure(&self, i2c_dev: i2c_master_dev_handle_t, lines: u32) -> bool {
+        let l = lines.clamp(1, self.max_exposure());
+        self.write(i2c_dev, 0x3e00, ((l & 0xf000) >> 12) as u8)
+            && self.write(i2c_dev, 0x3e01, ((l & 0x0ff0) >> 4) as u8)
+            && self.write(i2c_dev, 0x3e02, ((l & 0x000f) << 4) as u8)
+    }
+
+    /// Set the analog gain as a linear multiplier (1.0 = unity).
+    ///
+    /// Coarse gain (0x3e08) doubles per bucket — 0x03/0x07/0x23/0x27/0x2f/0x3f = 1/2/4/8/16/32x;
+    /// fine gain (0x3e09) runs 0x40 (= bucket base) up to 0x7f (≈2x the base). Values and
+    /// bucket layout are from the datasheet-derived AgainInfo table.
+    pub(super) unsafe fn set_analog_gain(&self, i2c_dev: i2c_master_dev_handle_t, gain: f32) -> bool {
+        const BUCKETS: [(f32, u8); 6] = [
+            (1.0, 0x03), (2.0, 0x07), (4.0, 0x23), (8.0, 0x27), (16.0, 0x2f), (32.0, 0x3f),
+        ];
+        let g = gain.clamp(1.0, 48.0);
+        let (base, coarse) = BUCKETS.iter().rev().find(|&&(b, _)| g >= b).copied().unwrap_or(BUCKETS[0]);
+        let fine = ((0x40 as f32 * g / base).round() as i32).clamp(0x40, 0x7f) as u8;
+        self.write(i2c_dev, 0x3e08, coarse) && self.write(i2c_dev, 0x3e09, fine)
+    }
+
     unsafe fn write(&self, dev: i2c_master_dev_handle_t, reg: u16, val: u8) -> bool {
         let buf = [(reg >> 8) as u8, reg as u8, val];
         for attempt in 0..3u8 {
@@ -62,6 +100,8 @@ pub const SC850SL: CameraSensor = CameraSensor {
     black_level: 16,
     red_gain_seed: 1.5,
     blue_gain_seed: 1.5,
+    vts: 0x08ca,            // regs 0x320e/0x320f in the init table (2250 lines)
+    default_exposure: 2080, // reg 0x3e01=0x82 -> 0x820 = 2080 lines
     init_table: SC850SL_INIT_TABLE,
     delayed_registers: &[0x36e9, 0x36f9],
 };
