@@ -1,20 +1,18 @@
 mod audio;
 mod camera;
-mod csp;
 mod csp_arch;
 mod debug;
 mod error;
 mod kiss;
+mod link;
 mod ota;
-mod uart;
 
 use audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
 use camera::{Camera, Image, MIPI, RgbCamera, SC850SL, ThermalCamera};
-use csp::Csp;
 use debug::DebugChannel;
 use error::{Error, Result};
+use link::{Command, PayloadLink};
 use sstv::{Encoder, Mode, RgbPixel, Synthesizer};
-use uart::Uart;
 
 use esp_idf_hal::{delay, peripherals::Peripherals};
 
@@ -81,13 +79,12 @@ fn capture_both(camera: &mut RgbCamera, thermal: &mut ThermalCamera) -> (Image, 
 /// wait 5 s, and transmit the infrared image. Each transmission is framed by its own
 /// BUSY→AVAILABLE status, so the gap between RGB and IR reports AVAILABLE.
 fn capture_and_transmit_both(
-    uart: &Uart,
-    csp: &Csp,
+    link: &PayloadLink,
     camera: &mut RgbCamera,
     thermal: &mut ThermalCamera,
     audio: &mut AudioChannel,
 ) {
-    csp.send_status(uart, b"BUSY");
+    link.send_status(b"BUSY");
 
     let (rgb, ir) = capture_both(camera, thermal);
 
@@ -98,17 +95,17 @@ fn capture_and_transmit_both(
 
     // Signal AVAILABLE during the gap between the two transmissions, then BUSY again
     // before the infrared one so the status tracks each individual transmission.
-    csp.send_status(uart, b"AVAILABLE");
+    link.send_status(b"AVAILABLE");
     log::info!("Waiting 5 s before the infrared transmission...");
     delay::FreeRtos::delay_ms(5_000);
-    csp.send_status(uart, b"BUSY");
+    link.send_status(b"BUSY");
 
     log::info!("SSTV: transmitting infrared image...");
     if let Err(e) = transmit_sstv(ir, audio) {
         log::error!("IR SSTV transmission failed: {e}");
     }
 
-    csp.send_status(uart, b"AVAILABLE");
+    link.send_status(b"AVAILABLE");
     log::info!("Both images sent, waiting for commands");
 }
 
@@ -129,36 +126,30 @@ fn capture_and_dump_usb(debug: &DebugChannel, camera: &mut RgbCamera, thermal: &
     log::info!("USB-C: both frames sent");
 }
 
-fn initialize_esp32() -> Result<Uart> {
+fn initialize_esp32() -> Result<Peripherals> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    let peripherals = Peripherals::take().map_err(|_| Error::Peripheral)?;
-    Ok(Uart::new(
+    Peripherals::take().map_err(|_| Error::Peripheral)
+}
+
+fn main() {
+    let peripherals = initialize_esp32().unwrap();
+
+    let mut link = PayloadLink::try_new(
         peripherals.uart1,
         peripherals.pins.gpio38,
         peripherals.pins.gpio37,
         peripherals.pins.gpio39,
-    ))
-}
-
-fn main() {
-    let uart = initialize_esp32().expect("fatal peripherals error");
-
-    let csp = Csp::init();
-
-    log::info!(
-        "CSP node {} ready at {} baud (RX=G37 TX=G38 DE=G39)",
-        csp::NODE,
-        uart::BAUD_RATE
-    );
+    )
+    .unwrap();
 
     // Announce the boot to the OBC and report which firmware is running, so the
     // ground can confirm the reboot and validate the deployed image (e.g. after OTA).
     let fw = firmware_id();
-    log::info!("Boot: reporting to node {} ({fw})", csp::OBC_NODE);
-    csp.send_msg(&uart, csp::OBC_NODE, csp::OBC_PORT, b"STATUS: BOOTED");
-    csp.send_msg(&uart, csp::OBC_NODE, csp::OBC_PORT, fw.as_bytes());
+    log::info!("Boot: reporting to node {} ({fw})", link::OBC_NODE);
+    link.send_msg(link::OBC_NODE, link::OBC_PORT, b"STATUS: BOOTED");
+    link.send_msg(link::OBC_NODE, link::OBC_PORT, fw.as_bytes());
 
     log::info!("RGB camera: initializing...");
     let mut camera = RgbCamera::new(SC850SL, MIPI).expect("camera init");
@@ -174,15 +165,8 @@ fn main() {
     // frames over the serial console (see local/capture_frame_via_usb_c.sh).
     let mut debug = DebugChannel::new();
 
-    csp.send_status(&uart, b"AVAILABLE");
+    link.send_status(b"AVAILABLE");
     log::info!("Sent AVAILABLE, waiting for commands");
-
-    let mut decoder = kiss::KissDecoder::new();
-    let mut ota = ota::OtaState::new();
-    let mut buf = [0u8; 512];
-    // Poll the RS485 read with a short timeout (rather than blocking forever) so the
-    // loop also gets to service the USB-C debug trigger each iteration.
-    let read_timeout = delay::TickType::new_millis(100).ticks();
 
     loop {
         if debug.poll_trigger() {
@@ -190,59 +174,12 @@ fn main() {
             capture_and_dump_usb(&debug, &mut camera, &mut thermal);
         }
 
-        if let Ok(n) = uart.read(&mut buf, read_timeout) {
-            for &b in &buf[..n] {
-                if let Some(frame) = decoder.push(b) {
-                    if let Some(pkt) = kiss::frame_to_packet(&frame) {
-                        if !matches!(ota, ota::OtaState::Writing(_)) {
-                            let id = pkt.id();
-                            let (src, sport, dst, dport, flags) =
-                                (id.src, id.sport, id.dst, id.dport, id.flags);
-                            log::info!(
-                                "[UART RX] from {}:{} to {}:{} is {} (flags 0x{:02x}, len={})",
-                                src,
-                                sport,
-                                dst,
-                                dport,
-                                kiss::fmt_payload(pkt.data()),
-                                flags,
-                                pkt.data().len()
-                            );
-                        }
-                        csp.iface.rx(pkt);
-                    }
+        for cmd in link.poll() {
+            match cmd {
+                Command::Sstv => {
+                    capture_and_transmit_both(&link, &mut camera, &mut thermal, &mut audio)
                 }
             }
-        }
-
-        let _ = csp.node.route_work();
-
-        while let Some(conn) = csp.ping_sock.accept(0) {
-            while let Some(pkt) = conn.read(0) {
-                conn.handle_service(pkt);
-            }
-        }
-
-        while let Some(conn) = csp.ota_sock.accept(0) {
-            while let Some(pkt) = conn.read(0) {
-                ota.handle(pkt.data());
-            }
-        }
-
-        while let Some(conn) = csp.cmd_sock.accept(0) {
-            while let Some(pkt) = conn.read(0) {
-                if pkt.data().starts_with(b"SSTV") {
-                    log::info!("CMD: SSTV requested");
-                    capture_and_transmit_both(&uart, &csp, &mut camera, &mut thermal, &mut audio);
-                } else {
-                    log::warn!("CMD: unknown payload: {}", kiss::fmt_payload(pkt.data()));
-                }
-            }
-        }
-
-        let to_send = kiss::take_tx();
-        if !to_send.is_empty() {
-            uart.send(&to_send);
         }
 
         delay::FreeRtos::delay_ms(1);

@@ -1,6 +1,4 @@
-//! KISS framing and the CSP-over-KISS interface that rides the UART link.
-
-use std::sync::Mutex;
+//! KISS framing codec and CSP packet (de)serialization for the UART link.
 
 const FEND: u8 = 0xC0;
 const FESC: u8 = 0xDB;
@@ -9,7 +7,7 @@ const TFESC: u8 = 0xDD;
 
 const CSP_FLAG_CRC32: u8 = 0x10;
 
-fn kiss_encode(data: &[u8]) -> Vec<u8> {
+pub fn kiss_encode(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + 4);
     out.push(FEND);
     out.push(0x00);
@@ -118,48 +116,6 @@ pub fn fmt_payload(bytes: &[u8]) -> String {
         .map(|b| format!("{b:02x}"))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// Packets queued by nexthop() for transmission; drained via [`take_tx`].
-static TX_BUF: Mutex<Vec<u8>> = Mutex::new(Vec::new());
-
-/// Drain the KISS TX bytes queued by [`UartKissIface::nexthop`].
-pub fn take_tx() -> Vec<u8> {
-    std::mem::take(&mut *TX_BUF.lock().unwrap())
-}
-
-pub struct UartKissIface;
-
-impl libcsp::CspInterface for UartKissIface {
-    fn nexthop(&mut self, _via: u16, packet: libcsp::Packet, from_me: bool) {
-        if !from_me {
-            return;
-        }
-        let id = packet.id();
-        let (src, sport, dst, dport, flags) = (id.src, id.sport, id.dst, id.dport, id.flags);
-        log::info!(
-            "[UART TX] from {}:{} to {}:{} is {} (flags 0x{:02x})",
-            src,
-            sport,
-            dst,
-            dport,
-            fmt_payload(packet.data()),
-            flags
-        );
-        let word: u32 = ((id.pri as u32) << 30)
-            | ((id.src as u32) << 25)
-            | ((id.dst as u32) << 20)
-            | ((id.dport as u32) << 14)
-            | ((id.sport as u32) << 8)
-            | (id.flags as u32);
-        let mut raw = word.to_be_bytes().to_vec();
-        raw.extend_from_slice(packet.data());
-        TX_BUF.lock().unwrap().extend_from_slice(&kiss_encode(&raw));
-    }
-
-    fn name(&self) -> &str {
-        "KISS"
-    }
 }
 
 /// Decode a KISS payload into a CSP Packet, or None if it is too short.
