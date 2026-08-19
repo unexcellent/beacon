@@ -83,7 +83,7 @@ impl libcsp::CspInterface for KissUartIface {
 }
 
 /// Messages that can be transmitted via the payload link
-pub enum TxMessage {
+pub enum Message {
     /// Message for payload board announcing idle state.
     Available,
     /// Boot announcement carrying the firmware identity for ground validation.
@@ -94,7 +94,7 @@ pub enum TxMessage {
     Error(Error),
 }
 
-impl TxMessage {
+impl Message {
     /// Return the destination CSP node.
     pub fn node(&self) -> u16 {
         match self {
@@ -202,7 +202,7 @@ impl PayloadLink {
 
     /// Transmit a message via the payload link. The interface's nexthop
     /// KISS-encodes it and writes it to the UART before this returns.
-    pub fn send(&self, message: TxMessage) {
+    pub fn send(&self, message: Message) {
         log::info!(
             "Sending '{}' to {}:{}",
             String::from_utf8_lossy(&message.payload()),

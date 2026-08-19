@@ -11,7 +11,7 @@ use audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
 use camera::{MIPI, RgbCamera, SC850SL, ThermalCamera, capture_both};
 use debug::DebugChannel;
 use error::{Error, ReportIfErr, Result};
-use link::{Command, PayloadLink, TxMessage};
+use link::{Command, Message, PayloadLink};
 use sstv::{Encoder, Mode, RgbPixel, Synthesizer};
 
 use esp_idf_hal::{delay, peripherals::Peripherals};
@@ -57,12 +57,12 @@ fn capture_and_transmit_both(
     thermal: Option<&mut ThermalCamera>,
     audio: Option<&mut AudioChannel>,
 ) {
-    link.send(TxMessage::Busy);
+    link.send(Message::Busy);
 
     // Without the audio channel nothing can be transmitted, so skip the captures too.
     let Some(audio) = audio else {
         log::warn!("Audio channel unavailable, skipping SSTV transmission");
-        link.send(TxMessage::Available);
+        link.send(Message::Available);
         return;
     };
 
@@ -79,10 +79,10 @@ fn capture_and_transmit_both(
             if have_both {
                 // Signal AVAILABLE during the gap between the two transmissions, then BUSY
                 // again before the infrared one so the status tracks each transmission.
-                link.send(TxMessage::Available);
+                link.send(Message::Available);
                 log::info!("Waiting 5 s before the infrared transmission...");
                 delay::FreeRtos::delay_ms(5_000);
-                link.send(TxMessage::Busy);
+                link.send(Message::Busy);
             }
         }
         None => log::warn!("RGB camera unavailable, skipping RGB transmission"),
@@ -98,7 +98,7 @@ fn capture_and_transmit_both(
         None => log::warn!("Thermal camera unavailable, skipping infrared transmission"),
     }
 
-    link.send(TxMessage::Available);
+    link.send(Message::Available);
     log::info!("Transmission finished");
 }
 
@@ -148,7 +148,7 @@ fn initialize_payload_link(peripherals: Peripherals) -> Result<PayloadLink> {
         peripherals.pins.gpio39,
     )?;
 
-    link.send(TxMessage::Booted(firmware_id()));
+    link.send(Message::Booted(firmware_id()));
 
     Ok(link)
 }
@@ -163,7 +163,7 @@ fn main() {
 
     let mut debug = DebugChannel::new();
 
-    link.send(TxMessage::Available);
+    link.send(Message::Available);
 
     loop {
         if debug.poll_trigger() {
