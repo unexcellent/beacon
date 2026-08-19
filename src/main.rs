@@ -10,7 +10,7 @@ mod ota;
 use audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
 use camera::{Camera, Image, MIPI, RgbCamera, SC850SL, ThermalCamera};
 use debug::DebugChannel;
-use error::{Error, Result};
+use error::{Error, ReportIfErr, Result};
 use link::{Command, PayloadLink, TxMessage};
 use sstv::{Encoder, Mode, RgbPixel, Synthesizer};
 
@@ -148,17 +148,6 @@ fn announce_boot(link: &mut PayloadLink) {
     link.send(TxMessage::Booted(fw));
 }
 
-fn report_if_failed<T>(result: Result<T>, link: &mut PayloadLink) -> Result<T> {
-    match result {
-        Ok(inner) => Ok(inner),
-        Err(e) => {
-            log::info!("{}", &e.to_string());
-            link.send(TxMessage::Error(e.clone()));
-            Err(e)
-        }
-    }
-}
-
 fn main() {
     let peripherals = initialize_esp32().unwrap();
     let mut link = initialize_payload_link(peripherals).unwrap();
@@ -166,11 +155,10 @@ fn main() {
     announce_boot(&mut link);
 
     log::info!("RGB camera: initializing...");
-    let mut camera = report_if_failed(
-        RgbCamera::new(SC850SL, MIPI).map_err(|_| Error::RgbInit),
-        &mut link,
-    )
-    .unwrap();
+    let mut camera = RgbCamera::new(SC850SL, MIPI)
+        .map_err(|_| Error::RgbInit)
+        .report_if_err(&link)
+        .unwrap();
 
     log::info!("Thermal camera: initializing (MI1602 via MI48Dx)...");
     let mut thermal = ThermalCamera::new().expect("thermal camera init");
