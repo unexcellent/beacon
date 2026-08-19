@@ -8,7 +8,7 @@ mod link;
 mod ota;
 
 use audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
-use camera::{Camera, Image, MIPI, RgbCamera, SC850SL, ThermalCamera};
+use camera::{MIPI, RgbCamera, SC850SL, ThermalCamera, capture_both};
 use debug::DebugChannel;
 use error::{Error, ReportIfErr, Result};
 use link::{Command, PayloadLink, TxMessage};
@@ -46,25 +46,6 @@ where
     audio.flush().map_err(|_| Error::Peripheral)?;
     log::info!("SSTV: transmission complete");
     Ok(())
-}
-
-/// Capture one frame with each camera as close together in time as the single-threaded
-/// flow allows. Returns (RGB, infrared); a frame is None if its camera is unavailable
-/// (failed to initialize).
-fn capture_both(
-    rgb: Option<&mut RgbCamera>,
-    thermal: Option<&mut ThermalCamera>,
-) -> (Option<Image>, Option<Image>) {
-    let rgb = rgb.map(|cam| {
-        log::info!("RGB camera: activating + calibrating...");
-        cam.capture()
-    });
-    let ir = thermal.map(|cam| {
-        log::info!("Thermal camera: capturing (averaged)...");
-        cam.capture()
-    });
-    log::info!("Frames captured");
-    (rgb, ir)
 }
 
 /// Handle one SSTV command: capture both cameras, then transmit the RGB image,
