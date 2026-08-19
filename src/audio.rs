@@ -101,7 +101,7 @@ impl AudioChannel {
     ///
     /// Allocates the ESP-IDF I2S channel and applies the standard-mode configuration
     /// derived from `encoder` and `interface`. The channel is left disabled after creation.
-    pub fn new(encoder: AudioEncoder, interface: AudioInterface) -> Result<Self, EspError> {
+    pub fn try_new(encoder: AudioEncoder, interface: AudioInterface) -> crate::Result<Self> {
         let chan_cfg = i2s_chan_config_t {
             id: I2S0,
             role: MASTER,
@@ -111,7 +111,10 @@ impl AudioChannel {
         };
 
         let mut tx: i2s_chan_handle_t = ptr::null_mut();
-        unsafe { esp!(i2s_new_channel(&chan_cfg, &mut tx, ptr::null_mut()))? };
+        unsafe {
+            esp!(i2s_new_channel(&chan_cfg, &mut tx, ptr::null_mut()))
+                .map_err(|_| crate::Error::AudioInit)?
+        };
 
         let data_bit_width = if encoder.width_16bit { BW_16 } else { BW_24 };
         let ws_width = if encoder.width_16bit { 16 } else { 24 };
@@ -153,7 +156,9 @@ impl AudioChannel {
             },
         };
 
-        unsafe { esp!(i2s_channel_init_std_mode(tx, &std_cfg))? };
+        unsafe {
+            esp!(i2s_channel_init_std_mode(tx, &std_cfg)).map_err(|_| crate::Error::AudioInit)?
+        };
 
         let channel = Self {
             inner: tx,
@@ -161,7 +166,7 @@ impl AudioChannel {
             buf: vec![0u8; interface.chunk_size * 4],
             buf_pos: 0,
         };
-        channel.enable()?;
+        channel.enable().map_err(|_| crate::Error::AudioInit)?;
         Ok(channel)
     }
 

@@ -5,6 +5,8 @@ use crate::link::{PayloadLink, TxMessage};
 /// Crate-wide error type wrapping the errors of the underlying drivers.
 #[derive(Clone)]
 pub enum Error {
+    /// Raised if the audio channel failed to initilize.
+    AudioInit,
     /// Raised when an error with creating the libcsp node occurred.
     CspInit,
     /// Raised when an error with the ESP32 hardware occurred.
@@ -20,6 +22,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AudioInit => write!(f, "audio channel initialization failed"),
             Self::CspInit => write!(f, "csp initialization failed"),
             Self::Peripheral => write!(f, "peripheral allocation failed"),
             Self::RgbInit => write!(f, "rgb camera initialization failed"),

@@ -90,9 +90,16 @@ fn capture_and_transmit_both(
     link: &PayloadLink,
     rgb: Option<&mut RgbCamera>,
     thermal: Option<&mut ThermalCamera>,
-    audio: &mut AudioChannel,
+    audio: Option<&mut AudioChannel>,
 ) {
     link.send(TxMessage::Busy);
+
+    // Without the audio channel nothing can be transmitted, so skip the captures too.
+    let Some(audio) = audio else {
+        log::warn!("Audio channel unavailable, skipping SSTV transmission");
+        link.send(TxMessage::Available);
+        return;
+    };
 
     let (rgb, ir) = capture_both(rgb, thermal);
     let have_both = rgb.is_some() && ir.is_some();
@@ -190,7 +197,7 @@ fn main() {
     let mut rgb = RgbCamera::try_new(SC850SL, MIPI).report_if_err(&link);
     let mut thermal = ThermalCamera::try_new().report_if_err(&link);
 
-    let mut audio = AudioChannel::new(PCM5102A, PHILLIPS_I2S).expect("audio init");
+    let mut audio = AudioChannel::try_new(PCM5102A, PHILLIPS_I2S).report_if_err(&link);
 
     // USB-C debug link: lets a host trigger a two-camera capture and receive both
     // frames over the serial console (see local/capture_frame_via_usb_c.sh).
@@ -211,7 +218,7 @@ fn main() {
                     &link,
                     rgb.as_mut().ok(),
                     thermal.as_mut().ok(),
-                    &mut audio,
+                    audio.as_mut().ok(),
                 ),
             }
         }
