@@ -65,18 +65,20 @@ fn shoot(camera: &mut dyn Camera, warmup: u32) -> Image {
 }
 
 /// Capture one frame with each camera as close together in time as the single-threaded
-/// flow allows. Returns (RGB, infrared); the RGB frame is None if the camera is
-/// unavailable (failed to initialize), in which case only the thermal frame is taken.
+/// flow allows. Returns (RGB, infrared); a frame is None if its camera is unavailable
+/// (failed to initialize).
 fn capture_both(
     rgb: Option<&mut RgbCamera>,
-    thermal: &mut ThermalCamera,
-) -> (Option<Image>, Image) {
+    thermal: Option<&mut ThermalCamera>,
+) -> (Option<Image>, Option<Image>) {
     let rgb = rgb.map(|cam| {
         log::info!("RGB camera: activating + calibrating...");
         shoot(cam, RGB_WARMUP_FRAMES)
     });
-    log::info!("Thermal camera: capturing (averaged)...");
-    let ir = shoot(thermal, THERMAL_WARMUP_FRAMES);
+    let ir = thermal.map(|cam| {
+        log::info!("Thermal camera: capturing (averaged)...");
+        shoot(cam, THERMAL_WARMUP_FRAMES)
+    });
     log::info!("Frames captured");
     (rgb, ir)
 }
@@ -87,32 +89,41 @@ fn capture_both(
 fn capture_and_transmit_both(
     link: &PayloadLink,
     rgb: Option<&mut RgbCamera>,
-    thermal: &mut ThermalCamera,
+    thermal: Option<&mut ThermalCamera>,
     audio: &mut AudioChannel,
 ) {
     link.send(TxMessage::Busy);
 
     let (rgb, ir) = capture_both(rgb, thermal);
+    let have_both = rgb.is_some() && ir.is_some();
 
-    if let Some(rgb) = rgb {
-        log::info!("SSTV: transmitting RGB image...");
-        if let Err(e) = transmit_sstv(rgb, audio) {
-            log::error!("RGB SSTV transmission failed: {e}");
+    match rgb {
+        Some(rgb) => {
+            log::info!("SSTV: transmitting RGB image...");
+            if let Err(e) = transmit_sstv(rgb, audio) {
+                log::error!("RGB SSTV transmission failed: {e}");
+            }
+
+            if have_both {
+                // Signal AVAILABLE during the gap between the two transmissions, then BUSY
+                // again before the infrared one so the status tracks each transmission.
+                link.send(TxMessage::Available);
+                log::info!("Waiting 5 s before the infrared transmission...");
+                delay::FreeRtos::delay_ms(5_000);
+                link.send(TxMessage::Busy);
+            }
         }
-
-        // Signal AVAILABLE during the gap between the two transmissions, then BUSY again
-        // before the infrared one so the status tracks each individual transmission.
-        link.send(TxMessage::Available);
-        log::info!("Waiting 5 s before the infrared transmission...");
-        delay::FreeRtos::delay_ms(5_000);
-        link.send(TxMessage::Busy);
-    } else {
-        log::warn!("RGB camera unavailable, transmitting only the infrared image");
+        None => log::warn!("RGB camera unavailable, skipping RGB transmission"),
     }
 
-    log::info!("SSTV: transmitting infrared image...");
-    if let Err(e) = transmit_sstv(ir, audio) {
-        log::error!("IR SSTV transmission failed: {e}");
+    match ir {
+        Some(ir) => {
+            log::info!("SSTV: transmitting infrared image...");
+            if let Err(e) = transmit_sstv(ir, audio) {
+                log::error!("IR SSTV transmission failed: {e}");
+            }
+        }
+        None => log::warn!("Thermal camera unavailable, skipping infrared transmission"),
     }
 
     link.send(TxMessage::Available);
@@ -125,21 +136,27 @@ fn capture_and_transmit_both(
 fn capture_and_dump_usb(
     debug: &DebugChannel,
     rgb: Option<&mut RgbCamera>,
-    thermal: &mut ThermalCamera,
+    thermal: Option<&mut ThermalCamera>,
 ) {
     let (rgb, ir) = capture_both(rgb, thermal);
 
-    if let Some(rgb) = rgb {
-        log::info!("USB-C: sending RGB frame...");
-        if let Err(e) = debug.send_image("rgb", rgb.width(), rgb.height(), rgb) {
-            log::error!("USB-C RGB frame send failed: {e}");
+    match rgb {
+        Some(rgb) => {
+            log::info!("USB-C: sending RGB frame...");
+            if let Err(e) = debug.send_image("rgb", rgb.width(), rgb.height(), rgb) {
+                log::error!("USB-C RGB frame send failed: {e}");
+            }
         }
-    } else {
-        log::warn!("RGB camera unavailable, sending only the thermal frame");
+        None => log::warn!("RGB camera unavailable, skipping RGB frame"),
     }
-    log::info!("USB-C: sending thermal frame...");
-    if let Err(e) = debug.send_image("thermal", ir.width(), ir.height(), ir) {
-        log::error!("USB-C thermal frame send failed: {e}");
+    match ir {
+        Some(ir) => {
+            log::info!("USB-C: sending thermal frame...");
+            if let Err(e) = debug.send_image("thermal", ir.width(), ir.height(), ir) {
+                log::error!("USB-C thermal frame send failed: {e}");
+            }
+        }
+        None => log::warn!("Thermal camera unavailable, skipping thermal frame"),
     }
     log::info!("USB-C: frames sent");
 }
@@ -169,11 +186,9 @@ fn initialize_payload_link(peripherals: Peripherals) -> Result<PayloadLink> {
 fn main() {
     let peripherals = initialize_esp32().unwrap();
     let mut link = initialize_payload_link(peripherals).unwrap();
-    let mut rgb = RgbCamera::try_new(SC850SL, MIPI).report_if_err(&link);
 
-    log::info!("Thermal camera: initializing (MI1602 via MI48Dx)...");
-    let mut thermal = ThermalCamera::new().expect("thermal camera init");
-    log::info!("Thermal camera: ready");
+    let mut rgb = RgbCamera::try_new(SC850SL, MIPI).report_if_err(&link);
+    let mut thermal = ThermalCamera::try_new().report_if_err(&link);
 
     let mut audio = AudioChannel::new(PCM5102A, PHILLIPS_I2S).expect("audio init");
 
@@ -187,14 +202,17 @@ fn main() {
     loop {
         if debug.poll_trigger() {
             log::info!("USB-C: capture trigger received");
-            capture_and_dump_usb(&debug, rgb.as_mut().ok(), &mut thermal);
+            capture_and_dump_usb(&debug, rgb.as_mut().ok(), thermal.as_mut().ok());
         }
 
         for cmd in link.poll() {
             match cmd {
-                Command::Sstv => {
-                    capture_and_transmit_both(&link, rgb.as_mut().ok(), &mut thermal, &mut audio)
-                }
+                Command::Sstv => capture_and_transmit_both(
+                    &link,
+                    rgb.as_mut().ok(),
+                    thermal.as_mut().ok(),
+                    &mut audio,
+                ),
             }
         }
 

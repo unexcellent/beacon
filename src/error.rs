@@ -11,6 +11,8 @@ pub enum Error {
     Peripheral,
     /// Raised if the RGB camera failed to initilize.
     RgbInit,
+    /// Raised if the thermal camera failed to initilize.
+    ThermalInit,
     /// Raised when an error with the UART interface occurs.
     UartAllocation,
 }
@@ -21,6 +23,7 @@ impl fmt::Display for Error {
             Self::CspInit => write!(f, "csp initialization failed"),
             Self::Peripheral => write!(f, "peripheral allocation failed"),
             Self::RgbInit => write!(f, "rgb camera initialization failed"),
+            Self::ThermalInit => write!(f, "thermal camera initialization failed"),
             Self::UartAllocation => write!(f, "UART initialization failed"),
         }
     }

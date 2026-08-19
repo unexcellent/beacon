@@ -126,12 +126,13 @@ pub struct ThermalCamera {
 }
 
 impl ThermalCamera {
-    pub fn new() -> Result<Self, EspError> {
+    pub fn try_new() -> crate::Result<Self> {
+        log::info!("Thermal camera: initializing (MI1602 via MI48Dx)...");
         unsafe {
             Self::reset_mi48();
-            let spi = Self::setup_spi()?;
-            let (i2c_bus, i2c) = Self::setup_i2c()?;
-            Self::setup_data_ready_gpio()?;
+            let spi = Self::setup_spi().map_err(|_| crate::Error::ThermalInit)?;
+            let (i2c_bus, i2c) = Self::setup_i2c().map_err(|_| crate::Error::ThermalInit)?;
+            Self::setup_data_ready_gpio().map_err(|_| crate::Error::ThermalInit)?;
 
             let rx_buf = heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_DMA | MALLOC_CAP_8BIT) as *mut u8;
             assert!(!rx_buf.is_null(), "MI48: frame buffer allocation failed");
