@@ -113,6 +113,9 @@ const BOOT_TIMEOUT_MS: u32 = 3_000;
 /// uncorrelated between frames, so averaging N frames cuts its amplitude by ~√N —
 /// the main lever against the salt-and-pepper speckle in a single raw frame.
 const AVERAGE_FRAMES: u32 = 8;
+/// Frames to capture and discard on activation so the on-chip temporal/median
+/// filters converge before the kept capture.
+const WARMUP_FRAMES: u32 = 5;
 /// Per-frame timeout waiting for DATA_READY, matching the reference's
 /// MI1602_DATA_READY_TIMEOUT_MS. Real frames arrive in tens of ms.
 const FRAME_TIMEOUT_MS: u32 = 2_000;
@@ -170,8 +173,10 @@ impl ThermalCamera {
         // Surface a failed trigger write: if this I²C write does not land, the MI48Dx is
         // never told to capture, so DATA_READY can never assert. Logging it distinguishes
         // "trigger didn't reach the chip" from "chip triggered but produced no frame".
-        if let Err(e) = self.write_reg(REG_FRAME_MODE, FRAME_MODE_SINGLE_FRAME | FRAME_MODE_NO_HEADER)
-        {
+        if let Err(e) = self.write_reg(
+            REG_FRAME_MODE,
+            FRAME_MODE_SINGLE_FRAME | FRAME_MODE_NO_HEADER,
+        ) {
             log::warn!("MI48: FRAME_MODE trigger write failed: {}", err_name(e));
         }
         if self.wait_for_data_ready(FRAME_TIMEOUT_MS) {
@@ -464,7 +469,6 @@ impl ThermalCamera {
         esp_rom_delay_us(SPI_CS_SETTLE_US);
         gpio_set_level(PIN_CS as gpio_num_t, 1);
     }
-
 }
 
 impl Camera for ThermalCamera {
@@ -478,8 +482,8 @@ impl Camera for ThermalCamera {
 
     /// Capture and discard `frames` single-shot frames so the on-chip temporal/median
     /// filters — which keep state across captures — converge before the frames we keep.
-    fn calibrate(&mut self, frames: u32) {
-        for _ in 0..frames {
+    fn calibrate(&mut self) {
+        for _ in 0..WARMUP_FRAMES {
             unsafe { self.capture_one() };
         }
     }
@@ -489,7 +493,7 @@ impl Camera for ThermalCamera {
     /// converges to the true temperature while the noise shrinks by ~√N — this is what
     /// kills the salt-and-pepper speckle. Call [`calibrate`](Self::calibrate) first so the
     /// on-chip filters have settled.
-    fn capture(&mut self) -> Image {
+    fn receive_frame(&mut self) -> Image {
         unsafe {
             let mut acc = vec![0u32; FRAME_WORDS];
             let mut n = 0u32;

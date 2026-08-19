@@ -28,8 +28,17 @@ pub trait Camera {
     fn power_on(&mut self);
     /// Return the sensor to a low-power idle state.
     fn power_off(&mut self);
-    /// Capture and discard `frames` frames so the sensor / on-chip filters settle.
-    fn calibrate(&mut self, frames: u32);
-    /// Capture a single frame as a ready-to-encode image.
-    fn capture(&mut self) -> Image;
+    /// Capture and discard warm-up frames so the sensor / on-chip filters settle.
+    /// Each implementation knows how many frames it needs.
+    fn calibrate(&mut self);
+    /// Receive a single frame as a ready-to-encode image.
+    fn receive_frame(&mut self) -> Image;
+    /// Capture a frame from turned off state and turn the camera back off.
+    fn capture(&mut self) -> Image {
+        self.power_on();
+        self.calibrate();
+        let image = self.receive_frame();
+        self.power_off();
+        image
+    }
 }

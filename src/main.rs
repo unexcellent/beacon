@@ -48,22 +48,6 @@ where
     Ok(())
 }
 
-/// Frames each camera discards to settle before the kept capture. The RGB sensor just
-/// needs its stream to stabilise after power-on; the thermal sensor needs enough
-/// single-shot frames for its on-chip temporal/median filters to converge.
-const RGB_WARMUP_FRAMES: u32 = 2;
-const THERMAL_WARMUP_FRAMES: u32 = 5;
-
-/// Power a camera on, let it settle for `warmup` frames, capture one frame, then power it
-/// back off. The shared [`Camera`] trait lets both cameras run the exact same sequence.
-fn shoot(camera: &mut dyn Camera, warmup: u32) -> Image {
-    camera.power_on();
-    camera.calibrate(warmup);
-    let image = camera.capture();
-    camera.power_off();
-    image
-}
-
 /// Capture one frame with each camera as close together in time as the single-threaded
 /// flow allows. Returns (RGB, infrared); a frame is None if its camera is unavailable
 /// (failed to initialize).
@@ -73,11 +57,11 @@ fn capture_both(
 ) -> (Option<Image>, Option<Image>) {
     let rgb = rgb.map(|cam| {
         log::info!("RGB camera: activating + calibrating...");
-        shoot(cam, RGB_WARMUP_FRAMES)
+        cam.capture()
     });
     let ir = thermal.map(|cam| {
         log::info!("Thermal camera: capturing (averaged)...");
-        shoot(cam, THERMAL_WARMUP_FRAMES)
+        cam.capture()
     });
     log::info!("Frames captured");
     (rgb, ir)

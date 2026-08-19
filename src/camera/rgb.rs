@@ -22,6 +22,10 @@ const AE_HL_SCALE: f32 = 0.7; // forced exposure cut per step while highlights c
 const AE_GAIN_MAX: f32 = 48.0; // analog-gain ceiling (sensor table tops out ~49.6x)
 const AE_MAX_ITERS: u32 = 6; // frame budget for convergence
 
+/// Frames to capture and discard on activation: the sensor stream just needs to
+/// stabilise after power-on before the kept capture.
+const WARMUP_FRAMES: u32 = 2;
+
 // Holds the capture buffer pointer and length for the CSI DMA callbacks.
 // Heap-allocated so its address is stable after being registered as userdata.
 pub(crate) struct CaptureBuffer {
@@ -111,8 +115,10 @@ impl RgbCamera {
                 capture_buffer,
             };
 
-            // Calibrate briefly to verify streaming works, then go to standby.
-            cam.calibrate(3);
+            // Discard a few frames to verify streaming works, then go to standby.
+            for _ in 0..3 {
+                cam.wait_for_frame();
+            }
             cam.power_off();
 
             Ok(cam)
@@ -218,13 +224,13 @@ impl Camera for RgbCamera {
         }
     }
 
-    fn calibrate(&mut self, frames: u32) {
-        for _ in 0..frames {
+    fn calibrate(&mut self) {
+        for _ in 0..WARMUP_FRAMES {
             self.wait_for_frame();
         }
     }
 
-    fn capture(&mut self) -> Image {
+    fn receive_frame(&mut self) -> Image {
         self.wait_for_frame();
         unsafe {
             build_image(
