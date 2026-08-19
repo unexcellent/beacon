@@ -66,9 +66,9 @@ fn shoot(camera: &mut dyn Camera, warmup: u32) -> Image {
 
 /// Capture one frame with each camera as close together in time as the single-threaded
 /// flow allows. Returns (RGB, infrared).
-fn capture_both(camera: &mut RgbCamera, thermal: &mut ThermalCamera) -> (Image, Image) {
+fn capture_both(rgb: &mut RgbCamera, thermal: &mut ThermalCamera) -> (Image, Image) {
     log::info!("RGB camera: activating + calibrating...");
-    let rgb = shoot(camera, RGB_WARMUP_FRAMES);
+    let rgb = shoot(rgb, RGB_WARMUP_FRAMES);
     log::info!("Thermal camera: capturing (averaged)...");
     let ir = shoot(thermal, THERMAL_WARMUP_FRAMES);
     log::info!("Both frames captured");
@@ -80,13 +80,13 @@ fn capture_both(camera: &mut RgbCamera, thermal: &mut ThermalCamera) -> (Image, 
 /// BUSY→AVAILABLE status, so the gap between RGB and IR reports AVAILABLE.
 fn capture_and_transmit_both(
     link: &PayloadLink,
-    camera: &mut RgbCamera,
+    rgb: &mut RgbCamera,
     thermal: &mut ThermalCamera,
     audio: &mut AudioChannel,
 ) {
     link.send(TxMessage::Busy);
 
-    let (rgb, ir) = capture_both(camera, thermal);
+    let (rgb, ir) = capture_both(rgb, thermal);
 
     log::info!("SSTV: transmitting RGB image...");
     if let Err(e) = transmit_sstv(rgb, audio) {
@@ -112,8 +112,8 @@ fn capture_and_transmit_both(
 /// Debug path (USB-C trigger): capture both cameras exactly like the SSTV command,
 /// then stream both frames over the USB-C serial link, each tagged with its camera
 /// name, for local/capture_frame_via_usb_c.sh to save.
-fn capture_and_dump_usb(debug: &DebugChannel, camera: &mut RgbCamera, thermal: &mut ThermalCamera) {
-    let (rgb, ir) = capture_both(camera, thermal);
+fn capture_and_dump_usb(debug: &DebugChannel, rgb: &mut RgbCamera, thermal: &mut ThermalCamera) {
+    let (rgb, ir) = capture_both(rgb, thermal);
 
     log::info!("USB-C: sending RGB frame...");
     if let Err(e) = debug.send_image("rgb", rgb.width(), rgb.height(), rgb) {
@@ -155,7 +155,7 @@ fn main() {
     announce_boot(&mut link);
 
     log::info!("RGB camera: initializing...");
-    let mut camera = RgbCamera::try_new(SC850SL, MIPI)
+    let mut rgb = RgbCamera::try_new(SC850SL, MIPI)
         .report_if_err(&link)
         .unwrap();
 
@@ -175,13 +175,13 @@ fn main() {
     loop {
         if debug.poll_trigger() {
             log::info!("USB-C: capture trigger received");
-            capture_and_dump_usb(&debug, &mut camera, &mut thermal);
+            capture_and_dump_usb(&debug, &mut rgb, &mut thermal);
         }
 
         for cmd in link.poll() {
             match cmd {
                 Command::Sstv => {
-                    capture_and_transmit_both(&link, &mut camera, &mut thermal, &mut audio)
+                    capture_and_transmit_both(&link, &mut rgb, &mut thermal, &mut audio)
                 }
             }
         }
