@@ -1,6 +1,6 @@
 use core::fmt;
 
-use crate::link::{PayloadLink, TxMessage};
+use crate::link::{Message, PayloadLink};
 
 /// Crate-wide error type wrapping the errors of the underlying drivers.
 #[derive(Clone)]
@@ -55,7 +55,7 @@ impl<T> ReportIfErr<T> for Result<T> {
     fn report_if_err(self, link: &PayloadLink) -> Result<T> {
         if let Err(e) = &self {
             log::error!("{e}");
-            link.send(TxMessage::Error(e.clone()));
+            link.send(Message::Error(e.clone()));
         }
         self
     }

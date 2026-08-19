@@ -226,50 +226,75 @@ impl PayloadLink {
     /// the router, service the ping and OTA sockets internally, and return the
     /// application commands that arrived.
     pub fn poll(&mut self) -> Vec<Command> {
+        self.pump_rx();
+        let _ = self.node.route_work();
+        self.service_ping();
+        self.service_ota();
+        self.collect_commands()
+    }
+
+    /// Feed received UART bytes through the KISS decoder and inject every
+    /// complete CSP packet into libcsp's input queue.
+    fn pump_rx(&mut self) {
         let mut buf = [0u8; 512];
         // Poll the RS485 read with a short timeout (rather than blocking forever) so
         // the main loop also gets to service the USB-C debug trigger each iteration.
         let read_timeout = delay::TickType::new_millis(100).ticks();
 
-        if let Ok(n) = self.rx.read(&mut buf, read_timeout) {
-            for &b in &buf[..n] {
-                if let Some(frame) = self.decoder.push(b) {
-                    if let Some(pkt) = kiss::frame_to_packet(&frame) {
-                        if !matches!(self.ota, OtaState::Writing(_)) {
-                            let id = pkt.id();
-                            let (src, sport, dst, dport, flags) =
-                                (id.src, id.sport, id.dst, id.dport, id.flags);
-                            log::info!(
-                                "[UART RX] from {}:{} to {}:{} is {} (flags 0x{:02x}, len={})",
-                                src,
-                                sport,
-                                dst,
-                                dport,
-                                kiss::fmt_payload(pkt.data()),
-                                flags,
-                                pkt.data().len()
-                            );
-                        }
-                        self.iface.rx(pkt);
-                    }
-                }
+        let Ok(n) = self.rx.read(&mut buf, read_timeout) else {
+            return;
+        };
+        for &b in &buf[..n] {
+            let Some(frame) = self.decoder.push(b) else {
+                continue;
+            };
+            if let Some(pkt) = kiss::frame_to_packet(&frame) {
+                self.log_rx_packet(&pkt);
+                self.iface.rx(pkt);
             }
         }
+    }
 
-        let _ = self.node.route_work();
+    /// Log one received packet, except while an OTA write is in progress (hundreds
+    /// of data chunks would flood the console).
+    fn log_rx_packet(&self, pkt: &libcsp::Packet) {
+        if matches!(self.ota, OtaState::Writing(_)) {
+            return;
+        }
+        let id = pkt.id();
+        let (src, sport, dst, dport, flags) = (id.src, id.sport, id.dst, id.dport, id.flags);
+        log::info!(
+            "[UART RX] from {}:{} to {}:{} is {} (flags 0x{:02x}, len={})",
+            src,
+            sport,
+            dst,
+            dport,
+            kiss::fmt_payload(pkt.data()),
+            flags,
+            pkt.data().len()
+        );
+    }
 
+    /// Answer pings via libcsp's built-in service handler.
+    fn service_ping(&mut self) {
         while let Some(conn) = self.ping_sock.accept(0) {
             while let Some(pkt) = conn.read(0) {
                 conn.handle_service(pkt);
             }
         }
+    }
 
+    /// Feed firmware-update packets into the OTA state machine.
+    fn service_ota(&mut self) {
         while let Some(conn) = self.ota_sock.accept(0) {
             while let Some(pkt) = conn.read(0) {
                 self.ota.handle(pkt.data());
             }
         }
+    }
 
+    /// Drain the command socket and return the recognized application commands.
+    fn collect_commands(&mut self) -> Vec<Command> {
         let mut commands = Vec::new();
         while let Some(conn) = self.cmd_sock.accept(0) {
             while let Some(pkt) = conn.read(0) {
