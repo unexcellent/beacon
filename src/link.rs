@@ -203,6 +203,12 @@ impl PayloadLink {
     /// Transmit a message via the payload link. The interface's nexthop
     /// KISS-encodes it and writes it to the UART before this returns.
     pub fn send(&self, message: TxMessage) {
+        log::info!(
+            "Sending '{}' to {}:{}",
+            String::from_utf8_lossy(&message.payload()),
+            message.node(),
+            message.port()
+        );
         if let Some(mut pkt) = libcsp::Packet::get(0) {
             pkt.write(&message.payload()).ok();
             self.node.sendto(

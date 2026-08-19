@@ -41,16 +41,6 @@ impl DebugChannel {
         Self { rx: Vec::new() }
     }
 
-    #[allow(dead_code)] // available for ad-hoc debug logging
-    pub fn log(&self, msg: &str) {
-        log::info!("{msg}");
-    }
-
-    #[allow(dead_code)] // available for ad-hoc debug logging
-    pub fn error(&self, msg: &str) {
-        log::error!("{msg}");
-    }
-
     /// Drain whatever is waiting on USB-C stdin and report whether the capture
     /// trigger token has arrived since the last call. Non-blocking.
     pub fn poll_trigger(&mut self) -> bool {
@@ -105,7 +95,9 @@ impl DebugChannel {
         header.extend_from_slice(&(height as u16).to_le_bytes());
         header.extend_from_slice(&byte_len.to_le_bytes());
 
-        let data: Vec<u8> = pixels.flat_map(|p| [p.red(), p.green(), p.blue()]).collect();
+        let data: Vec<u8> = pixels
+            .flat_map(|p| [p.red(), p.green(), p.blue()])
+            .collect();
 
         let mut out = std::io::stdout();
         out.write_all(&header)?;

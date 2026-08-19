@@ -134,7 +134,7 @@ fn capture_and_transmit_both(
     }
 
     link.send(TxMessage::Available);
-    log::info!("Transmission finished, waiting for commands");
+    log::info!("Transmission finished");
 }
 
 /// Debug path (USB-C trigger): capture both cameras exactly like the SSTV command,
@@ -183,9 +183,7 @@ fn initialize_payload_link(peripherals: Peripherals) -> Result<PayloadLink> {
         peripherals.pins.gpio39,
     )?;
 
-    let fw = firmware_id();
-    log::info!("Boot: reporting to OBC ({fw})");
-    link.send(TxMessage::Booted(fw));
+    link.send(TxMessage::Booted(firmware_id()));
 
     Ok(link)
 }
@@ -196,15 +194,11 @@ fn main() {
 
     let mut rgb = RgbCamera::try_new(SC850SL, MIPI).report_if_err(&link);
     let mut thermal = ThermalCamera::try_new().report_if_err(&link);
-
     let mut audio = AudioChannel::try_new(PCM5102A, PHILLIPS_I2S).report_if_err(&link);
 
-    // USB-C debug link: lets a host trigger a two-camera capture and receive both
-    // frames over the serial console (see local/capture_frame_via_usb_c.sh).
     let mut debug = DebugChannel::new();
 
     link.send(TxMessage::Available);
-    log::info!("Sent AVAILABLE, waiting for commands");
 
     loop {
         if debug.poll_trigger() {
