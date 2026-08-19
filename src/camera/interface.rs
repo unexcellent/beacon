@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use esp_idf_sys::*;
 
-use super::{CameraSensor, CaptureBuffer, InnerCamera};
+use super::CameraSensor;
+use super::rgb::{CaptureBuffer, InnerCamera};
 
 unsafe extern "C" {
     fn isp_bypass_raw10_patch(h_res: u32, v_res: u32);
@@ -129,8 +130,8 @@ impl CameraInterface {
         esp!(esp_cam_new_csi_ctlr(&csi_cfg, &mut csi))?;
 
         let cbs = esp_cam_ctlr_evt_cbs_t {
-            on_get_new_trans: Some(super::on_get_new_trans),
-            on_trans_finished: Some(super::on_trans_finished),
+            on_get_new_trans: Some(super::rgb::on_get_new_trans),
+            on_trans_finished: Some(super::rgb::on_trans_finished),
         };
         esp!(esp_cam_ctlr_register_event_callbacks(
             csi,

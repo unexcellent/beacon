@@ -3,13 +3,11 @@ mod camera;
 mod csp_arch;
 mod debug;
 mod ota;
-mod thermal;
 
 use audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
-use camera::{Camera, Image, MIPI, SC850SL};
+use camera::{Camera, Image, MIPI, RgbCamera, SC850SL, ThermalCamera};
 use debug::DebugChannel;
 use sstv::{Encoder, Mode, RgbPixel, Synthesizer};
-use thermal::{ThermalCamera, ThermalImage};
 
 use esp_idf_hal::{
     delay,
@@ -278,17 +276,29 @@ where
     Ok(())
 }
 
-/// Calibrate both cameras and capture one frame with each as close together in time
-/// as the single-threaded flow allows. `camera.activate()` streams and runs calibration
-/// frames so the RGB capture is instant; the thermal capture then warms up its on-chip
-/// filters and averages several frames for noise reduction. Returns (RGB, infrared).
-fn capture_both(camera: &mut Camera, thermal: &mut ThermalCamera) -> (Image, ThermalImage) {
+/// Frames each camera discards to settle before the kept capture. The RGB sensor just
+/// needs its stream to stabilise after power-on; the thermal sensor needs enough
+/// single-shot frames for its on-chip temporal/median filters to converge.
+const RGB_WARMUP_FRAMES: u32 = 2;
+const THERMAL_WARMUP_FRAMES: u32 = 5;
+
+/// Power a camera on, let it settle for `warmup` frames, capture one frame, then power it
+/// back off. The shared [`Camera`] trait lets both cameras run the exact same sequence.
+fn shoot(camera: &mut dyn Camera, warmup: u32) -> Image {
+    camera.power_on();
+    camera.calibrate(warmup);
+    let image = camera.capture();
+    camera.power_off();
+    image
+}
+
+/// Capture one frame with each camera as close together in time as the single-threaded
+/// flow allows. Returns (RGB, infrared).
+fn capture_both(camera: &mut RgbCamera, thermal: &mut ThermalCamera) -> (Image, Image) {
     log::info!("RGB camera: activating + calibrating...");
-    camera.activate();
-    let rgb = camera.capture();
-    camera.deactivate();
+    let rgb = shoot(camera, RGB_WARMUP_FRAMES);
     log::info!("Thermal camera: capturing (averaged)...");
-    let ir = thermal.capture();
+    let ir = shoot(thermal, THERMAL_WARMUP_FRAMES);
     log::info!("Both frames captured");
     (rgb, ir)
 }
@@ -299,7 +309,7 @@ fn capture_both(camera: &mut Camera, thermal: &mut ThermalCamera) -> (Image, The
 fn capture_and_transmit_both(
     uart: &UartDriver,
     node: &libcsp::CspNode,
-    camera: &mut Camera,
+    camera: &mut RgbCamera,
     thermal: &mut ThermalCamera,
     audio: &mut AudioChannel,
 ) {
@@ -331,7 +341,7 @@ fn capture_and_transmit_both(
 /// Debug path (USB-C trigger): capture both cameras exactly like the SSTV command,
 /// then stream both frames over the USB-C serial link, each tagged with its camera
 /// name, for local/capture_frame_via_usb_c.sh to save.
-fn capture_and_dump_usb(debug: &DebugChannel, camera: &mut Camera, thermal: &mut ThermalCamera) {
+fn capture_and_dump_usb(debug: &DebugChannel, camera: &mut RgbCamera, thermal: &mut ThermalCamera) {
     let (rgb, ir) = capture_both(camera, thermal);
 
     log::info!("USB-C: sending RGB frame...");
@@ -406,7 +416,7 @@ fn main() {
     send_msg(&uart, &node, OBC_NODE, OBC_PORT, fw.as_bytes());
 
     log::info!("RGB camera: initializing...");
-    let mut camera = Camera::new(SC850SL, MIPI).expect("camera init");
+    let mut camera = RgbCamera::new(SC850SL, MIPI).expect("camera init");
     log::info!("RGB camera: ready (standby)");
 
     log::info!("Thermal camera: initializing (MI1602 via MI48Dx)...");

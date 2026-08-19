@@ -28,6 +28,8 @@ use std::time::Duration;
 use esp_idf_sys::*;
 use sstv::RgbPixel;
 
+use super::{Camera, Image, OUTPUT_HEIGHT, OUTPUT_WIDTH, watermark};
+
 // ── Pin mapping: ESP32-P4 ↔ MI48Dx ──────────────────────────────────────────────
 // SPI2 data bus (MI48Dx is the SPI slave; ESP32 is master, Mode 0, MSB-first).
 const PIN_CS: i32 = 31; // G31_RMII_MDC  → SPI2 CS  (MI48 SSN, active low)
@@ -98,9 +100,8 @@ const THERMAL_HEIGHT: usize = 120;
 const FRAME_WORDS: usize = THERMAL_WIDTH * THERMAL_HEIGHT;
 const FRAME_BYTES: usize = FRAME_WORDS * 2;
 
-/// SSTV Robot36 output grid — exactly 2× the sensor, so upscaling is loss-free.
-const OUT_WIDTH: usize = sstv::Mode::Robot36.image_width() as usize;
-const OUT_HEIGHT: usize = sstv::Mode::Robot36.image_height() as usize;
+// SSTV Robot36 output grid (`super::OUTPUT_WIDTH`/`OUTPUT_HEIGHT`) is exactly 2× the
+// sensor, so upscaling is loss-free.
 
 /// Settle delay after the I²C bus is reset and before the first probe, letting the rails
 /// and the MI48Dx come up. Matches the reference driver's 2 s post-reset wait.
@@ -108,9 +109,6 @@ const BOOT_SETTLE_MS: u64 = 2_000;
 /// Milliseconds to poll STATUS.BOOTING_UP before giving up, matching the reference's
 /// MI1602_BOOT_TIMEOUT_MS. pysenxor polls with no timeout at all; 3 s is a safe bound.
 const BOOT_TIMEOUT_MS: u32 = 3_000;
-/// Single-shot frames to capture and discard so the on-chip temporal/median filters (which
-/// keep state across captures) converge before the frames we actually keep.
-const WARMUP_FRAMES: u32 = 5;
 /// Frames to capture and average after warm-up. Random per-pixel sensor noise is
 /// uncorrelated between frames, so averaging N frames cuts its amplitude by ~√N —
 /// the main lever against the salt-and-pepper speckle in a single raw frame.
@@ -162,39 +160,6 @@ impl ThermalCamera {
             cam.log_identity();
             cam.configure_filters();
             Ok(cam)
-        }
-    }
-
-    /// Capture a short warm-up burst so the on-chip filters settle, then average several
-    /// frames to suppress noise and turn the result into a greyscale, upscaled SSTV image.
-    pub fn capture(&mut self) -> ThermalImage {
-        unsafe {
-            // Warm-up: converge the on-chip temporal/median filters (frames discarded). The
-            // MI48Dx keeps its filter state across single-shot captures, so this settles it.
-            for _ in 0..WARMUP_FRAMES {
-                self.capture_one();
-            }
-
-            // Average AVERAGE_FRAMES frames per pixel. Random sensor noise is uncorrelated
-            // between frames, so the mean converges to the true temperature while the noise
-            // shrinks by ~√N — this is what kills the salt-and-pepper speckle.
-            let mut acc = vec![0u32; FRAME_WORDS];
-            let mut n = 0u32;
-            for _ in 0..AVERAGE_FRAMES {
-                if self.capture_one() {
-                    for (i, slot) in acc.iter_mut().enumerate() {
-                        *slot += self.word(i) as u32;
-                    }
-                    n += 1;
-                }
-            }
-
-            if n == 0 {
-                log::error!("MI48: no frame captured — transmitting a blank image");
-                return build_image(&vec![0u16; FRAME_WORDS]);
-            }
-            let averaged: Vec<u16> = acc.iter().map(|&s| (s / n) as u16).collect();
-            build_image(&averaged)
         }
     }
 
@@ -501,38 +466,54 @@ impl ThermalCamera {
 
 }
 
+impl Camera for ThermalCamera {
+    /// The MI48Dx has no host-controlled standby: it is triggered per frame and manages
+    /// its own calibration, so there is nothing to power on. (RSTN is not host-driven —
+    /// see `PIN_RESET`.)
+    fn power_on(&mut self) {}
+
+    /// See [`power_on`](Self::power_on): the MI48Dx has no host-controlled standby.
+    fn power_off(&mut self) {}
+
+    /// Capture and discard `frames` single-shot frames so the on-chip temporal/median
+    /// filters — which keep state across captures — converge before the frames we keep.
+    fn calibrate(&mut self, frames: u32) {
+        for _ in 0..frames {
+            unsafe { self.capture_one() };
+        }
+    }
+
+    /// Average `AVERAGE_FRAMES` frames per pixel, then map the result to a greyscale,
+    /// upscaled [`Image`]. Random sensor noise is uncorrelated between frames, so the mean
+    /// converges to the true temperature while the noise shrinks by ~√N — this is what
+    /// kills the salt-and-pepper speckle. Call [`calibrate`](Self::calibrate) first so the
+    /// on-chip filters have settled.
+    fn capture(&mut self) -> Image {
+        unsafe {
+            let mut acc = vec![0u32; FRAME_WORDS];
+            let mut n = 0u32;
+            for _ in 0..AVERAGE_FRAMES {
+                if self.capture_one() {
+                    for (i, slot) in acc.iter_mut().enumerate() {
+                        *slot += self.word(i) as u32;
+                    }
+                    n += 1;
+                }
+            }
+
+            if n == 0 {
+                log::error!("MI48: no frame captured — transmitting a blank image");
+                return build_image(&vec![0u16; FRAME_WORDS]);
+            }
+            let averaged: Vec<u16> = acc.iter().map(|&s| (s / n) as u16).collect();
+            build_image(&averaged)
+        }
+    }
+}
+
 impl Drop for ThermalCamera {
     fn drop(&mut self) {
         unsafe { heap_caps_free(self.rx_buf as *mut c_void) };
-    }
-}
-
-/// A ready-to-encode SSTV image: 320×240 RGB pixels in row-major order.
-#[derive(Clone)]
-pub struct ThermalImage {
-    pixels: Vec<RgbPixel>,
-    index: usize,
-}
-
-impl ThermalImage {
-    /// SSTV output grid width in pixels (constant: 2× the sensor).
-    pub fn width(&self) -> usize {
-        OUT_WIDTH
-    }
-
-    /// SSTV output grid height in pixels (constant: 2× the sensor).
-    pub fn height(&self) -> usize {
-        OUT_HEIGHT
-    }
-}
-
-impl Iterator for ThermalImage {
-    type Item = RgbPixel;
-
-    fn next(&mut self) -> Option<RgbPixel> {
-        let pixel = self.pixels.get(self.index).copied();
-        self.index += 1;
-        pixel
     }
 }
 
@@ -545,9 +526,9 @@ fn err_name(code: esp_err_t) -> &'static str {
     }
 }
 
-/// Turn an averaged 160×120 temperature frame into a greyscale, 2×-upscaled SSTV image,
+/// Turn an averaged 160×120 temperature frame into a greyscale, 2×-upscaled [`Image`],
 /// flipped horizontally to match the RGB camera's orientation.
-fn build_image(words: &[u16]) -> ThermalImage {
+fn build_image(words: &[u16]) -> Image {
     // Robust auto-scale: clip the coldest and hottest ~1% of pixels before choosing the
     // black/white points. A few outlier/noisy pixels would otherwise stretch the whole
     // range and wash the low-contrast scene out into amplified noise.
@@ -558,16 +539,16 @@ fn build_image(words: &[u16]) -> ThermalImage {
     let max = sorted[sorted.len() - 1 - trim];
     let range = (max.saturating_sub(min)).max(1) as f32;
 
-    let mut pixels = Vec::with_capacity(OUT_WIDTH * OUT_HEIGHT);
-    for oy in 0..OUT_HEIGHT {
-        let sy = oy * THERMAL_HEIGHT / OUT_HEIGHT;
-        for ox in 0..OUT_WIDTH {
+    let mut pixels = Vec::with_capacity(OUTPUT_WIDTH * OUTPUT_HEIGHT);
+    for oy in 0..OUTPUT_HEIGHT {
+        let sy = oy * THERMAL_HEIGHT / OUTPUT_HEIGHT;
+        for ox in 0..OUTPUT_WIDTH {
             // Overlay the shared MOVE-IIIa watermark (same position as the RGB image).
-            let pixel = if crate::camera::watermark::is_white_at(ox, oy) {
+            let pixel = if watermark::is_white_at(ox, oy) {
                 RgbPixel::new(255, 255, 255)
             } else {
                 // Mirror left↔right (flip horizontally) so the scene matches the RGB image.
-                let sx = (THERMAL_WIDTH - 1) - (ox * THERMAL_WIDTH / OUT_WIDTH);
+                let sx = (THERMAL_WIDTH - 1) - (ox * THERMAL_WIDTH / OUTPUT_WIDTH);
                 let v = words[sy * THERMAL_WIDTH + sx];
                 let norm = v.saturating_sub(min) as f32 / range;
                 grayscale(norm)
@@ -575,7 +556,7 @@ fn build_image(words: &[u16]) -> ThermalImage {
             pixels.push(pixel);
         }
     }
-    ThermalImage { pixels, index: 0 }
+    Image::from_pixels(OUTPUT_WIDTH, OUTPUT_HEIGHT, pixels)
 }
 
 /// Map a normalised temperature in `[0, 1]` to a greyscale pixel
