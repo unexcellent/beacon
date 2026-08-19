@@ -8,6 +8,8 @@ use esp_idf_hal::{
     units::Hertz,
 };
 
+use std::borrow::Cow;
+
 use crate::kiss;
 use crate::ota::OtaState;
 use crate::{Error, Result};
@@ -21,8 +23,8 @@ const CMD_PORT: u8 = 11;
 const PAYLOAD_NODE: u16 = 14;
 const PAYLOAD_PORT: u8 = 1;
 /// On-board computer: receives the boot status + firmware identity at startup.
-pub const OBC_NODE: u16 = 1;
-pub const OBC_PORT: u8 = 1;
+const OBC_NODE: u16 = 1;
+const OBC_PORT: u8 = 1;
 
 /// A command received from the payload board, returned by [`PayloadLink::poll`]
 /// for the application to execute.
@@ -76,6 +78,41 @@ impl libcsp::CspInterface for KissUartIface {
 
     fn name(&self) -> &str {
         "KISS"
+    }
+}
+
+/// Messages that can be transmitted via the payload link
+pub enum TxMessage {
+    Available,
+    /// Boot announcement carrying the firmware identity for ground validation.
+    Booted(String),
+    Busy,
+}
+
+impl TxMessage {
+    /// Return the destination CSP node.
+    pub fn node(&self) -> u16 {
+        match self {
+            Self::Available | Self::Busy => PAYLOAD_NODE,
+            Self::Booted(_) => OBC_NODE,
+        }
+    }
+
+    /// Return the destination CSP port.
+    pub fn port(&self) -> u8 {
+        match self {
+            Self::Available | Self::Busy => PAYLOAD_PORT,
+            Self::Booted(_) => OBC_PORT,
+        }
+    }
+
+    /// Return the raw packet payload bytes.
+    pub fn payload(&self) -> Cow<'_, [u8]> {
+        match self {
+            Self::Available => Cow::Borrowed(b"AVAILABLE".as_slice()),
+            Self::Busy => Cow::Borrowed(b"BUSY".as_slice()),
+            Self::Booted(fw) => Cow::Owned(format!("STATUS: BOOTED {fw}").into_bytes()),
+        }
     }
 }
 
@@ -142,12 +179,6 @@ impl PayloadLink {
         let mut cmd_sock = libcsp::Socket::new(libcsp::socket_opts::NONE);
         cmd_sock.bind(CMD_PORT).map_err(|_| Error::CspInit)?;
 
-        log::info!(
-            "CSP node {} ready at {} baud (RX=G37 TX=G38 DE=G39)",
-            NODE,
-            BAUD_RATE
-        );
-
         Ok(Self {
             rx: uart_rx,
             node,
@@ -161,19 +192,20 @@ impl PayloadLink {
         })
     }
 
-    /// Send `msg` as a CSP packet to `dst`:`port`. The interface's nexthop
+    /// Transmit a message via the payload link. The interface's nexthop
     /// KISS-encodes it and writes it to the UART before this returns.
-    pub fn send_msg(&self, dst: u16, port: u8, msg: &[u8]) {
+    pub fn send(&self, message: TxMessage) {
         if let Some(mut pkt) = libcsp::Packet::get(0) {
-            pkt.write(msg).ok();
-            self.node
-                .sendto(libcsp::Priority::Norm, dst, port, 0, 0, pkt);
+            pkt.write(&message.payload()).ok();
+            self.node.sendto(
+                libcsp::Priority::Norm,
+                message.node(),
+                message.port(),
+                0,
+                0,
+                pkt,
+            );
         }
-    }
-
-    /// Report the beacon status (BUSY/AVAILABLE) to the payload board.
-    pub fn send_status(&self, msg: &[u8]) {
-        self.send_msg(PAYLOAD_NODE, PAYLOAD_PORT, msg);
     }
 
     /// Pump the link once: feed received UART bytes through KISS into CSP, run

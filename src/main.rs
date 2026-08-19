@@ -11,7 +11,7 @@ use audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
 use camera::{Camera, Image, MIPI, RgbCamera, SC850SL, ThermalCamera};
 use debug::DebugChannel;
 use error::{Error, Result};
-use link::{Command, PayloadLink};
+use link::{Command, PayloadLink, TxMessage};
 use sstv::{Encoder, Mode, RgbPixel, Synthesizer};
 
 use esp_idf_hal::{delay, peripherals::Peripherals};
@@ -84,7 +84,7 @@ fn capture_and_transmit_both(
     thermal: &mut ThermalCamera,
     audio: &mut AudioChannel,
 ) {
-    link.send_status(b"BUSY");
+    link.send(TxMessage::Busy);
 
     let (rgb, ir) = capture_both(camera, thermal);
 
@@ -95,17 +95,17 @@ fn capture_and_transmit_both(
 
     // Signal AVAILABLE during the gap between the two transmissions, then BUSY again
     // before the infrared one so the status tracks each individual transmission.
-    link.send_status(b"AVAILABLE");
+    link.send(TxMessage::Available);
     log::info!("Waiting 5 s before the infrared transmission...");
     delay::FreeRtos::delay_ms(5_000);
-    link.send_status(b"BUSY");
+    link.send(TxMessage::Busy);
 
     log::info!("SSTV: transmitting infrared image...");
     if let Err(e) = transmit_sstv(ir, audio) {
         log::error!("IR SSTV transmission failed: {e}");
     }
 
-    link.send_status(b"AVAILABLE");
+    link.send(TxMessage::Available);
     log::info!("Both images sent, waiting for commands");
 }
 
@@ -133,27 +133,31 @@ fn initialize_esp32() -> Result<Peripherals> {
     Peripherals::take().map_err(|_| Error::Peripheral)
 }
 
-fn main() {
-    let peripherals = initialize_esp32().unwrap();
-
-    let mut link = PayloadLink::try_new(
+fn initialize_payload_link(peripherals: Peripherals) -> Result<PayloadLink> {
+    PayloadLink::try_new(
         peripherals.uart1,
         peripherals.pins.gpio38,
         peripherals.pins.gpio37,
         peripherals.pins.gpio39,
     )
-    .unwrap();
+}
 
-    // Announce the boot to the OBC and report which firmware is running, so the
-    // ground can confirm the reboot and validate the deployed image (e.g. after OTA).
+fn announce_boot(link: &mut PayloadLink) {
     let fw = firmware_id();
-    log::info!("Boot: reporting to node {} ({fw})", link::OBC_NODE);
-    link.send_msg(link::OBC_NODE, link::OBC_PORT, b"STATUS: BOOTED");
-    link.send_msg(link::OBC_NODE, link::OBC_PORT, fw.as_bytes());
+    log::info!("Boot: reporting to OBC ({fw})");
+    link.send(TxMessage::Booted(fw));
+}
 
+fn initialize_rgb() -> Result<RgbCamera> {
     log::info!("RGB camera: initializing...");
     let mut camera = RgbCamera::new(SC850SL, MIPI).expect("camera init");
-    log::info!("RGB camera: ready (standby)");
+}
+
+fn main() {
+    let peripherals = initialize_esp32().unwrap();
+    let mut link = initialize_payload_link(peripherals).unwrap();
+
+    announce_boot(&mut link);
 
     log::info!("Thermal camera: initializing (MI1602 via MI48Dx)...");
     let mut thermal = ThermalCamera::new().expect("thermal camera init");
@@ -165,7 +169,7 @@ fn main() {
     // frames over the serial console (see local/capture_frame_via_usb_c.sh).
     let mut debug = DebugChannel::new();
 
-    link.send_status(b"AVAILABLE");
+    link.send(TxMessage::Available);
     log::info!("Sent AVAILABLE, waiting for commands");
 
     loop {
