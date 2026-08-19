@@ -155,8 +155,7 @@ fn main() {
     announce_boot(&mut link);
 
     log::info!("RGB camera: initializing...");
-    let mut camera = RgbCamera::new(SC850SL, MIPI)
-        .map_err(|_| Error::RgbInit)
+    let mut camera = RgbCamera::try_new(SC850SL, MIPI)
         .report_if_err(&link)
         .unwrap();
 

@@ -85,15 +85,19 @@ pub struct RgbCamera {
 }
 
 impl RgbCamera {
-    pub fn new(sensor: CameraSensor, interface: CameraInterface) -> Result<Self, EspError> {
+    pub fn try_new(sensor: CameraSensor, interface: CameraInterface) -> crate::Result<Self> {
         unsafe {
             let capture_buffer = Self::allocate_capture_buffer(&sensor);
 
-            let inner = interface.init(&sensor, &capture_buffer)?;
-            inner.queue_receive(&capture_buffer)?;
+            let inner = interface
+                .init(&sensor, &capture_buffer)
+                .map_err(|_| crate::Error::RgbInit)?;
+            inner
+                .queue_receive(&capture_buffer)
+                .map_err(|_| crate::Error::RgbInit)?;
 
             if !sensor.enable(inner.i2c_dev) {
-                return Err(EspError::from_infallible::<ESP_ERR_INVALID_STATE>());
+                return Err(crate::Error::RgbInit);
             }
 
             let mut cam = Self {
