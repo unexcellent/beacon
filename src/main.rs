@@ -3,6 +3,7 @@ mod camera;
 mod csp;
 mod csp_arch;
 mod debug;
+mod error;
 mod kiss;
 mod ota;
 mod uart;
@@ -11,6 +12,7 @@ use audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
 use camera::{Camera, Image, MIPI, RgbCamera, SC850SL, ThermalCamera};
 use csp::Csp;
 use debug::DebugChannel;
+use error::{Error, Result};
 use sstv::{Encoder, Mode, RgbPixel, Synthesizer};
 use uart::Uart;
 
@@ -34,16 +36,16 @@ fn firmware_id() -> String {
 
 /// Encode any RGB pixel stream (RGB camera or false-coloured thermal) as Robot36
 /// SSTV and play it out over the audio channel.
-fn transmit_sstv<I>(image: I, audio: &mut AudioChannel) -> Result<(), Box<dyn std::error::Error>>
+fn transmit_sstv<I>(image: I, audio: &mut AudioChannel) -> Result<()>
 where
     I: Iterator<Item = RgbPixel> + 'static,
 {
     log::info!("SSTV: encoding and transmitting...");
     let encoder = Encoder::new(Mode::Robot36, image)?;
     for sample in Synthesizer::new(encoder, PHILLIPS_I2S.sample_rate) {
-        audio.transmit(sample)?;
+        audio.transmit(sample).map_err(|_| Error::Peripheral)?;
     }
-    audio.flush()?;
+    audio.flush().map_err(|_| Error::Peripheral)?;
     log::info!("SSTV: transmission complete");
     Ok(())
 }
@@ -127,20 +129,21 @@ fn capture_and_dump_usb(debug: &DebugChannel, camera: &mut RgbCamera, thermal: &
     log::info!("USB-C: both frames sent");
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
-
-fn main() {
+fn initialize_esp32() -> Result<Uart> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    let peripherals = Peripherals::take().unwrap();
-
-    let uart = Uart::new(
+    let peripherals = Peripherals::take().map_err(|_| Error::Peripheral)?;
+    Ok(Uart::new(
         peripherals.uart1,
         peripherals.pins.gpio38,
         peripherals.pins.gpio37,
         peripherals.pins.gpio39,
-    );
+    ))
+}
+
+fn main() {
+    let uart = initialize_esp32().expect("fatal peripherals error");
 
     let csp = Csp::init();
 
