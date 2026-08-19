@@ -3,7 +3,7 @@ use esp_idf_sys::{
     esp_ota_handle_t, esp_ota_set_boot_partition, esp_ota_write, esp_partition_t, esp_restart,
 };
 
-use crate::fmt_payload;
+use crate::kiss::fmt_payload;
 
 const OTA_WITH_SEQUENTIAL_WRITES: usize = 0xFFFFFFFE;
 
