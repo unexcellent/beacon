@@ -39,7 +39,7 @@ where
     I: Iterator<Item = RgbPixel> + 'static,
 {
     log::info!("SSTV: encoding and transmitting...");
-    let encoder = Encoder::new(Mode::Robot36, image)?;
+    let encoder = Encoder::new(Mode::Robot36, image).unwrap();
     for sample in Synthesizer::new(encoder, PHILLIPS_I2S.sample_rate) {
         audio.transmit(sample).map_err(|_| Error::Peripheral)?;
     }
@@ -148,9 +148,15 @@ fn announce_boot(link: &mut PayloadLink) {
     link.send(TxMessage::Booted(fw));
 }
 
-fn initialize_rgb() -> Result<RgbCamera> {
-    log::info!("RGB camera: initializing...");
-    let mut camera = RgbCamera::new(SC850SL, MIPI).expect("camera init");
+fn report_if_failed<T>(result: Result<T>, link: &mut PayloadLink) -> Result<T> {
+    match result {
+        Ok(inner) => Ok(inner),
+        Err(e) => {
+            log::info!("{}", &e.to_string());
+            link.send(TxMessage::Error(e.clone()));
+            Err(e)
+        }
+    }
 }
 
 fn main() {
@@ -158,6 +164,13 @@ fn main() {
     let mut link = initialize_payload_link(peripherals).unwrap();
 
     announce_boot(&mut link);
+
+    log::info!("RGB camera: initializing...");
+    let mut camera = report_if_failed(
+        RgbCamera::new(SC850SL, MIPI).map_err(|_| Error::RgbInit),
+        &mut link,
+    )
+    .unwrap();
 
     log::info!("Thermal camera: initializing (MI1602 via MI48Dx)...");
     let mut thermal = ThermalCamera::new().expect("thermal camera init");

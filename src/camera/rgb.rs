@@ -381,9 +381,12 @@ unsafe fn sample_bayer_region(
     let sx0 = src_width - c1;
     let sx1 = src_width - c0;
 
-    let mut sr = 0u32; let mut cr = 0u32;
-    let mut sg = 0u32; let mut cg = 0u32;
-    let mut sb = 0u32; let mut cb = 0u32;
+    let mut sr = 0u32;
+    let mut cr = 0u32;
+    let mut sg = 0u32;
+    let mut cg = 0u32;
+    let mut sb = 0u32;
+    let mut cb = 0u32;
 
     for sy in sy0..sy1 {
         let row = src.add(sy * row_bytes);
@@ -392,9 +395,18 @@ unsafe fn sample_bayer_region(
             let v = raw10_pixel(row, sx);
             // RGGB Bayer: R at even row + even col, B at odd row + odd col
             match (yodd, sx & 1) {
-                (0, 0) => { sr += v; cr += 1; }
-                (1, 1) => { sb += v; cb += 1; }
-                _      => { sg += v; cg += 1; }
+                (0, 0) => {
+                    sr += v;
+                    cr += 1;
+                }
+                (1, 1) => {
+                    sb += v;
+                    cb += 1;
+                }
+                _ => {
+                    sg += v;
+                    cg += 1;
+                }
             }
         }
     }

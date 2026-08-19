@@ -22,9 +22,10 @@ const OTA_PORT: u8 = 10;
 const CMD_PORT: u8 = 11;
 const PAYLOAD_NODE: u16 = 14;
 const PAYLOAD_PORT: u8 = 1;
-/// On-board computer: receives the boot status + firmware identity at startup.
 const OBC_NODE: u16 = 1;
 const OBC_PORT: u8 = 1;
+const UHF_GROUND_NODE: u16 = 2;
+const UHF_GROUND_PORT: u8 = 1;
 
 /// A command received from the payload board, returned by [`PayloadLink::poll`]
 /// for the application to execute.
@@ -83,10 +84,14 @@ impl libcsp::CspInterface for KissUartIface {
 
 /// Messages that can be transmitted via the payload link
 pub enum TxMessage {
+    /// Message for payload board announcing idle state.
     Available,
     /// Boot announcement carrying the firmware identity for ground validation.
     Booted(String),
+    /// Message for payload board announcing exit of idle state.
     Busy,
+    /// Error report for ground station.
+    Error(Error),
 }
 
 impl TxMessage {
@@ -95,6 +100,7 @@ impl TxMessage {
         match self {
             Self::Available | Self::Busy => PAYLOAD_NODE,
             Self::Booted(_) => OBC_NODE,
+            Self::Error(_) => UHF_GROUND_NODE,
         }
     }
 
@@ -103,6 +109,7 @@ impl TxMessage {
         match self {
             Self::Available | Self::Busy => PAYLOAD_PORT,
             Self::Booted(_) => OBC_PORT,
+            Self::Error(_) => UHF_GROUND_PORT,
         }
     }
 
@@ -112,6 +119,7 @@ impl TxMessage {
             Self::Available => Cow::Borrowed(b"AVAILABLE".as_slice()),
             Self::Busy => Cow::Borrowed(b"BUSY".as_slice()),
             Self::Booted(fw) => Cow::Owned(format!("STATUS: BOOTED {fw}").into_bytes()),
+            Self::Error(e) => Cow::Owned(e.to_string().into_bytes()),
         }
     }
 }
