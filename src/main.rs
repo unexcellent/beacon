@@ -152,28 +152,23 @@ fn initialize_esp32() -> Result<Peripherals> {
 }
 
 fn initialize_payload_link(peripherals: Peripherals) -> Result<PayloadLink> {
-    PayloadLink::try_new(
+    let link = PayloadLink::try_new(
         peripherals.uart1,
         peripherals.pins.gpio38,
         peripherals.pins.gpio37,
         peripherals.pins.gpio39,
-    )
-}
+    )?;
 
-fn announce_boot(link: &mut PayloadLink) {
     let fw = firmware_id();
     log::info!("Boot: reporting to OBC ({fw})");
     link.send(TxMessage::Booted(fw));
+
+    Ok(link)
 }
 
 fn main() {
     let peripherals = initialize_esp32().unwrap();
     let mut link = initialize_payload_link(peripherals).unwrap();
-
-    announce_boot(&mut link);
-
-    log::info!("RGB camera: initializing...");
-    // A failed RGB camera is downlinked but not fatal: SSTV degrades to thermal-only.
     let mut rgb = RgbCamera::try_new(SC850SL, MIPI).report_if_err(&link);
 
     log::info!("Thermal camera: initializing (MI1602 via MI48Dx)...");
@@ -197,12 +192,9 @@ fn main() {
 
         for cmd in link.poll() {
             match cmd {
-                Command::Sstv => capture_and_transmit_both(
-                    &link,
-                    rgb.as_mut().ok(),
-                    &mut thermal,
-                    &mut audio,
-                ),
+                Command::Sstv => {
+                    capture_and_transmit_both(&link, rgb.as_mut().ok(), &mut thermal, &mut audio)
+                }
             }
         }
 

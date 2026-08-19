@@ -86,6 +86,7 @@ pub struct RgbCamera {
 
 impl RgbCamera {
     pub fn try_new(sensor: CameraSensor, interface: CameraInterface) -> crate::Result<Self> {
+        log::info!("RGB camera: initializing...");
         unsafe {
             let capture_buffer = Self::allocate_capture_buffer(&sensor);
 
