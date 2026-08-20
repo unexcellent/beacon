@@ -5,7 +5,6 @@ mod update;
 
 use devices::audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
 use devices::camera::{MIPI, RgbCamera, SC850SL, ThermalCamera};
-use devices::debug::{DebugChannel, transmit_usb};
 use devices::link::{Command, Message, PayloadLink};
 use error::{Error, ReportIfErr, Result};
 use transmit_sstv::transmit_sstv;
@@ -21,15 +20,9 @@ fn main() {
     let mut thermal = initialize_thermal_camera().report_if_err(&link);
     let mut audio = initialize_audio_channel().report_if_err(&link);
 
-    let mut debug = DebugChannel::new();
-
     link.send(Message::Available);
 
     loop {
-        if debug.capture_has_been_triggered() {
-            transmit_usb(&debug, rgb.as_mut().ok(), thermal.as_mut().ok());
-        }
-
         match link.receive().report_if_err(&link) {
             Ok(Some(Command::Sstv)) => {
                 link.send(Message::Busy);
