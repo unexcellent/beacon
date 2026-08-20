@@ -8,7 +8,6 @@ use esp_idf_sys::{
     esp_ota_handle_t, esp_ota_set_boot_partition, esp_ota_write, esp_partition_t, esp_restart,
 };
 
-use crate::devices::kiss::fmt_payload;
 use crate::devices::link::{Command, PayloadLink};
 use crate::error::{Error, Result};
 
@@ -19,7 +18,6 @@ const OTA_WITH_SEQUENTIAL_WRITES: usize = 0xFFFFFFFE;
 /// fails. SSTV commands received in the meantime are ignored; ping stays alive
 /// since it is serviced inside [`PayloadLink::poll`].
 pub fn update(chunk_size: u16, link: &mut PayloadLink) -> Result<()> {
-    log::info!("OTA: update announced (chunk_size={chunk_size})");
     let mut state = UpdateState::Announced;
 
     loop {
@@ -82,20 +80,15 @@ impl Writer {
         unsafe {
             let partition = esp_ota_get_next_update_partition(ptr::null());
             if partition.is_null() {
-                log::error!("OTA: no update partition (partition table missing OTA slots?)");
-                return Err(Error::Update);
+                return Err(Error::UpdatePartition);
             }
+
             let mut handle: esp_ota_handle_t = 0;
-            let err = esp_ota_begin(partition, OTA_WITH_SEQUENTIAL_WRITES, &mut handle);
-            if err != ESP_OK as esp_err_t {
-                log::error!("OTA esp_ota_begin failed: 0x{:08x}", err);
-                return Err(Error::Update);
+            let result = esp_ota_begin(partition, OTA_WITH_SEQUENTIAL_WRITES, &mut handle);
+            if result != ESP_OK as esp_err_t {
+                return Err(Error::UpdateBegin);
             }
-            log::info!(
-                "OTA: session started, expecting {} bytes (chunk_size={})",
-                total,
-                chunk_size
-            );
+
             Ok(Self {
                 handle,
                 partition,
@@ -109,124 +102,104 @@ impl Writer {
     /// Validate and flash one DATA payload starting at `base_offset`.
     pub fn write_data(&mut self, base_offset: u32, raw: &[u8]) -> Result<()> {
         if base_offset != self.received {
-            log::error!(
-                "OTA DATA: gap detected — expected offset {:#x}, got {:#x} — aborting",
-                self.received,
-                base_offset
-            );
-            return Err(Error::Update);
+            return Err(Error::UpdatePackageOffset(self.received, base_offset));
         }
 
-        // The relay may append 4 bytes (CRC without flag) and/or batch multiple
-        // consecutive OTA packets into one CSP frame. Strip trailing bytes that
-        // are relay overhead: anything beyond the last complete chunk, unless the
-        // remaining firmware bytes are smaller than chunk_size (final chunk).
-        let payload = if self.chunk_size > 0 {
-            let cs = self.chunk_size as usize;
-            let remaining_total = self.total.saturating_sub(base_offset) as usize;
-            if remaining_total <= cs {
-                // Final chunk — take only the remaining firmware bytes.
-                let take = remaining_total.min(raw.len());
-                &raw[..take]
-            } else {
-                // Mid-transfer — strip to a whole number of full chunks.
-                let n_chunks = raw.len() / cs;
-                if n_chunks > 0 {
-                    &raw[..n_chunks * cs]
-                } else {
-                    raw
-                }
-            }
-        } else {
-            raw
-        };
+        let payload = self.strip_relay_overhead(base_offset, raw);
 
-        let mut pos = 0usize;
+        // The payload may batch several consecutive chunks: flash them one by one.
+        let mut pos = 0;
         while pos < payload.len() {
             let offset = base_offset + pos as u32;
-            let remaining = self.total.saturating_sub(offset);
-            if remaining == 0 {
-                break;
+            let remaining_image = self.total.saturating_sub(offset) as usize;
+            if remaining_image == 0 {
+                break; // bytes beyond the image length are relay overhead
             }
+
             let expected = if self.chunk_size > 0 {
-                (self.chunk_size as u32).min(remaining) as usize
+                remaining_image.min(self.chunk_size as usize)
             } else {
-                payload.len() - pos
+                payload.len() - pos // chunk size unknown: take everything
             };
-            let slice = &payload[pos..pos + expected.min(payload.len() - pos)];
-            let is_last = offset + slice.len() as u32 >= self.total;
+            let chunk = &payload[pos..pos + expected.min(payload.len() - pos)];
 
-            if self.chunk_size > 0 && slice.len() < expected && !is_last {
-                log::error!(
-                    "OTA DATA: chunk at {:#x} too short (got={}, expected={}) — aborting",
-                    offset,
-                    slice.len(),
-                    expected
-                );
-                return Err(Error::Update);
+            self.check_chunk_complete(offset, chunk.len(), expected)?;
+            self.write_chunk(offset, chunk)?;
+            pos += chunk.len();
+        }
+        Ok(())
+    }
+
+    /// The relay may append 4 bytes (CRC without flag) and/or batch multiple
+    /// consecutive OTA packets into one CSP frame. Strip trailing bytes that
+    /// are relay overhead: anything beyond the last complete chunk, unless the
+    /// remaining firmware bytes are smaller than chunk_size (final chunk).
+    fn strip_relay_overhead<'a>(&self, base_offset: u32, raw: &'a [u8]) -> &'a [u8] {
+        let chunk_size = self.chunk_size as usize;
+        if chunk_size == 0 {
+            return raw;
+        }
+
+        let remaining_total = self.total.saturating_sub(base_offset) as usize;
+        if remaining_total <= chunk_size {
+            &raw[..remaining_total.min(raw.len())]
+        } else {
+            let n_chunks = raw.len() / chunk_size;
+            if n_chunks > 0 {
+                &raw[..n_chunks * chunk_size]
+            } else {
+                raw
             }
+        }
+    }
 
-            self.write_chunk(offset, slice)?;
-            pos += slice.len();
+    /// A chunk shorter than expected is only acceptable as the image's last chunk.
+    fn check_chunk_complete(&self, offset: u32, got: usize, expected: usize) -> Result<()> {
+        let is_last = offset + got as u32 >= self.total;
+        let chunk_is_incomplete = self.chunk_size > 0 && got < expected;
+        if chunk_is_incomplete && !is_last {
+            return Err(Error::UpdateChunkIncomplete(
+                offset,
+                got as u32,
+                expected as u32,
+            ));
         }
         Ok(())
     }
 
     fn write_chunk(&mut self, offset: u32, data: &[u8]) -> Result<()> {
-        let n = data.len();
+        let data_len = data.len();
         unsafe {
-            let err = esp_ota_write(self.handle, data.as_ptr() as *const _, n);
+            let err = esp_ota_write(self.handle, data.as_ptr() as *const _, data_len);
             if err != ESP_OK as esp_err_t {
-                log::error!("OTA write failed at {:#x}: 0x{:08x}", offset, err);
-                return Err(Error::Update);
+                return Err(Error::UpdateWrite(offset, err));
             }
         }
-        self.received += n as u32;
-        let pct = self.received as f32 / self.total as f32 * 100.0;
+        self.received += data_len as u32;
+        let percentage = self.received as f32 / self.total as f32 * 100.0;
 
-        if n < 33 {
-            log::info!(
-                "{:.0}% | {} b arrived: {:02x?}",
-                pct.floor(),
-                n,
-                fmt_payload(data)
-            );
-        } else {
-            log::info!("{:.0}% | {} b arrived", pct, n);
-        }
+        log::info!("{:.0}% | {} b arrived", percentage, data_len);
         Ok(())
     }
 
     /// Verify completeness, validate the image and reboot into it.
     pub fn finish(self) -> Result<()> {
         if self.received != self.total {
-            log::error!(
-                "OTA END: incomplete — received {} of {} bytes — aborting",
-                self.received,
-                self.total
-            );
-            return Err(Error::Update);
+            return Err(Error::UpdateIncomplete(self.received, self.total));
         }
-
-        log::info!("OTA: finalizing ({} bytes written)...", self.received);
 
         unsafe {
             let err = esp_ota_end(self.handle);
             if err != ESP_OK as esp_err_t {
-                log::error!(
-                    "OTA esp_ota_end failed: 0x{:08x} (image corrupt or incomplete?)",
-                    err
-                );
-                return Err(Error::Update);
+                return Err(Error::UpdateCorrupt);
             }
+
             let err = esp_ota_set_boot_partition(self.partition);
             if err != ESP_OK as esp_err_t {
-                log::error!("OTA set_boot_partition failed: 0x{:08x}", err);
-                return Err(Error::Update);
+                return Err(Error::UpdateCorrupt);
             }
         }
 
-        log::info!("OTA: success — rebooting into new firmware");
         unsafe { esp_restart() };
     }
 }

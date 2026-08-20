@@ -21,10 +21,18 @@ pub enum Error {
     ThermalInit,
     /// Raised when an error with the UART interface occurs.
     UartAllocation,
-    /// Raised when a firmware update fails or is aborted.
-    Update,
+    /// Raised if the update session could not be started.
+    UpdateBegin,
+    UpdateChunkIncomplete(u32, u32, u32),
+    UpdateCorrupt,
+    UpdateIncomplete(u32, u32),
     /// Raised when an update data package is received but no update is in progress.
     UpdateNotInProgress,
+    /// Raised if no update partition could be created.
+    UpdatePartition,
+    /// Raised if the offset of an update package is not as expected.
+    UpdatePackageOffset(u32, u32),
+    UpdateWrite(u32, i32),
 }
 
 impl fmt::Display for Error {
@@ -38,9 +46,21 @@ impl fmt::Display for Error {
             Self::RgbInit => write!(f, "rgb camera initialization failed"),
             Self::ThermalInit => write!(f, "thermal camera initialization failed"),
             Self::UartAllocation => write!(f, "UART initialization failed"),
-            Self::Update => write!(f, "firmware update failed"),
-            Self::UpdateNotInProgress => {
-                write!(f, "update chunk received but no update in progress")
+            Self::UpdateBegin => write!(f, "update begin failed"),
+            Self::UpdateCorrupt => write!(f, "update corrupt"),
+            Self::UpdateChunkIncomplete(offset, is, should) => write!(
+                f,
+                "chunk {:#x} incomplete (is={}, should={})",
+                offset, is, should
+            ),
+            Self::UpdateIncomplete(is, should) => {
+                write!(f, "update incomplete (is={}, should={})", is, should)
+            }
+            Self::UpdateNotInProgress => write!(f, "update not announced or begun"),
+            Self::UpdatePartition => write!(f, "update partition could not be created"),
+            Self::UpdatePackageOffset(is, should) => write!(f, "is: {}, should: {}", is, should),
+            Self::UpdateWrite(offset, error_code) => {
+                write!(f, "at: {}, is: {}", offset, error_code)
             }
         }
     }
