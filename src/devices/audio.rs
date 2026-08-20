@@ -2,7 +2,7 @@ use core::ffi::c_void;
 use std::ptr;
 
 use esp_idf_sys::{
-    EspError, esp, gpio_num_t_GPIO_NUM_NC as GPIO_NC, i2s_chan_config_t, i2s_chan_handle_t,
+    esp, gpio_num_t_GPIO_NUM_NC as GPIO_NC, i2s_chan_config_t, i2s_chan_handle_t,
     i2s_channel_disable, i2s_channel_enable, i2s_channel_init_std_mode, i2s_channel_write,
     i2s_data_bit_width_t_I2S_DATA_BIT_WIDTH_16BIT as BW_16,
     i2s_data_bit_width_t_I2S_DATA_BIT_WIDTH_24BIT as BW_24, i2s_del_channel,
@@ -172,7 +172,7 @@ impl AudioChannel {
 
     /// Packs a mono 16-bit sample into the stereo I2S frame and writes to DMA when the
     /// internal buffer is full.
-    pub fn transmit(&mut self, sample: i16) -> Result<(), EspError> {
+    pub fn transmit(&mut self, sample: i16) -> crate::Result<()> {
         let [lo, hi] = sample.to_le_bytes();
         let (audio_off, silent_off) = if self.left_channel { (0, 2) } else { (2, 0) };
         self.buf[self.buf_pos + audio_off]     = lo;
@@ -187,7 +187,7 @@ impl AudioChannel {
         Ok(())
     }
 
-    pub fn flush(&mut self) -> Result<(), EspError> {
+    pub fn flush(&mut self) -> crate::Result<()> {
         let mut remaining = &self.buf[..self.buf_pos];
         while !remaining.is_empty() {
             let mut written = 0usize;
@@ -198,7 +198,8 @@ impl AudioChannel {
                     remaining.len(),
                     &mut written,
                     u32::MAX,
-                ))?;
+                ))
+                .map_err(|_| crate::Error::AudioTransmission)?;
             }
             remaining = &remaining[written..];
         }
@@ -213,8 +214,9 @@ impl AudioChannel {
         }
     }
 
-    fn enable(&self) -> Result<(), EspError> {
+    fn enable(&self) -> crate::Result<()> {
         unsafe { esp!(i2s_channel_enable(self.inner)) }
+            .map_err(|_| crate::Error::AudioTransmission)
     }
 }
 

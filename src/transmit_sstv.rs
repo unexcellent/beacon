@@ -46,9 +46,9 @@ fn transmit_image(image: Image, audio: &mut AudioChannel) -> Result<()> {
     log::info!("SSTV: encoding and transmitting...");
     let encoder = Encoder::new(Mode::Robot36, image).unwrap();
     for sample in Synthesizer::new(encoder, PHILLIPS_I2S.sample_rate) {
-        audio.transmit(sample).map_err(|_| Error::Peripheral)?;
+        audio.transmit(sample)?;
     }
-    audio.flush().map_err(|_| Error::Peripheral)?;
+    audio.flush()?;
     log::info!("SSTV: transmission complete");
     Ok(())
 }

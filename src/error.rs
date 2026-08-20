@@ -9,6 +9,8 @@ pub enum Error {
     AllCamerasInit,
     /// Raised if the audio channel failed to initilize.
     AudioInit,
+    /// Raised when writing samples to the I2S channel fails.
+    AudioTransmission,
     /// Raised when an error with creating the libcsp node occurred.
     CspInit,
     /// Raised when an error with the ESP32 hardware occurred.
@@ -26,6 +28,7 @@ impl fmt::Display for Error {
         match self {
             Self::AllCamerasInit => write!(f, "all cameras failed to initialize"),
             Self::AudioInit => write!(f, "audio channel initialization failed"),
+            Self::AudioTransmission => write!(f, "audio transmission failed"),
             Self::CspInit => write!(f, "csp initialization failed"),
             Self::Peripheral => write!(f, "peripheral allocation failed"),
             Self::RgbInit => write!(f, "rgb camera initialization failed"),

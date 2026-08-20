@@ -98,6 +98,7 @@ fn main() {
         for cmd in link.poll() {
             match cmd {
                 Command::Sstv => {
+                    link.send(Message::Busy);
                     let _ = transmit_sstv(
                         &mut link,
                         rgb.as_mut().ok(),
