@@ -4,8 +4,8 @@ mod ota;
 mod transmit_sstv;
 
 use devices::audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
-use devices::camera::{MIPI, RgbCamera, SC850SL, ThermalCamera, capture_both};
-use devices::debug::DebugChannel;
+use devices::camera::{MIPI, RgbCamera, SC850SL, ThermalCamera};
+use devices::debug::{DebugChannel, transmit_usb};
 use devices::link::{Command, Message, PayloadLink};
 use error::{Error, ReportIfErr, Result};
 use transmit_sstv::transmit_sstv;
@@ -24,37 +24,6 @@ fn firmware_id() -> String {
         .map(|b| format!("{b:02x}"))
         .collect();
     format!("FW: {version} sha256={sha}")
-}
-
-/// Debug path (USB-C trigger): capture both cameras exactly like the SSTV command,
-/// then stream both frames over the USB-C serial link, each tagged with its camera
-/// name, for local/capture_frame_via_usb_c.sh to save.
-fn capture_and_dump_usb(
-    debug: &DebugChannel,
-    rgb: Option<&mut RgbCamera>,
-    thermal: Option<&mut ThermalCamera>,
-) {
-    let (rgb, ir) = capture_both(rgb, thermal);
-
-    match rgb {
-        Some(rgb) => {
-            log::info!("USB-C: sending RGB frame...");
-            if let Err(e) = debug.send_image("rgb", rgb.width(), rgb.height(), rgb) {
-                log::error!("USB-C RGB frame send failed: {e}");
-            }
-        }
-        None => log::warn!("RGB camera unavailable, skipping RGB frame"),
-    }
-    match ir {
-        Some(ir) => {
-            log::info!("USB-C: sending thermal frame...");
-            if let Err(e) = debug.send_image("thermal", ir.width(), ir.height(), ir) {
-                log::error!("USB-C thermal frame send failed: {e}");
-            }
-        }
-        None => log::warn!("Thermal camera unavailable, skipping thermal frame"),
-    }
-    log::info!("USB-C: frames sent");
 }
 
 fn initialize_esp32() -> Result<Peripherals> {
@@ -90,9 +59,9 @@ fn main() {
     link.send(Message::Available);
 
     loop {
-        if debug.poll_trigger() {
+        if debug.capture_has_been_triggered() {
             log::info!("USB-C: capture trigger received");
-            capture_and_dump_usb(&debug, rgb.as_mut().ok(), thermal.as_mut().ok());
+            transmit_usb(&debug, rgb.as_mut().ok(), thermal.as_mut().ok());
         }
 
         for cmd in link.poll() {
@@ -100,7 +69,6 @@ fn main() {
                 Command::Sstv => {
                     link.send(Message::Busy);
                     let _ = transmit_sstv(
-                        &mut link,
                         rgb.as_mut().ok(),
                         thermal.as_mut().ok(),
                         audio.as_mut().ok(),

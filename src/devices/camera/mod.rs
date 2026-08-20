@@ -43,20 +43,7 @@ pub trait Camera {
     }
 }
 
-/// Capture one frame with each camera as close together in time as the single-threaded
-/// flow allows. Returns (RGB, infrared); a frame is None if its camera is unavailable
-/// (failed to initialize).
-pub fn capture_both(
-    rgb: Option<&mut RgbCamera>,
-    thermal: Option<&mut ThermalCamera>,
-) -> (Option<Image>, Option<Image>) {
-    let rgb = rgb.map(|cam| {
-        log::info!("RGB camera: activating + calibrating...");
-        cam.capture()
-    });
-    let ir = thermal.map(|cam| {
-        log::info!("Thermal camera: capturing (averaged)...");
-        cam.capture()
-    });
-    (rgb, ir)
+/// Capture one frame, or None if the camera is unavailable (failed to initialize).
+pub fn capture_image<C: Camera>(camera: Option<&mut C>) -> Option<Image> {
+    camera.map(|cam| cam.capture())
 }

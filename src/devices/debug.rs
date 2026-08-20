@@ -6,8 +6,45 @@ use esp_idf_sys::{
 };
 use sstv::RgbPixel;
 
+use crate::devices::camera::{Image, RgbCamera, ThermalCamera, capture_image};
+
 unsafe extern "C" {
     fn usb_serial_jtag_vfs_set_tx_line_endings(mode: i32);
+}
+
+/// Debug path (USB-C trigger): capture both cameras exactly like the SSTV command,
+/// then stream both frames over the USB-C serial link, each tagged with its camera
+/// name, for local/capture_frame_via_usb_c.sh to save.
+///
+/// Unlike the SSTV path this never aborts: each frame is captured and sent
+/// independently and failures are only logged, since the host triggering the
+/// dump is on the USB cable and sees the console anyway.
+pub fn transmit_usb(
+    debug: &DebugChannel,
+    rgb: Option<&mut RgbCamera>,
+    thermal: Option<&mut ThermalCamera>,
+) {
+    let rgb_image = capture_image(rgb);
+    let thermal_image = capture_image(thermal);
+
+    match rgb_image {
+        Some(image) => transmit_frame("rgb", image, debug),
+        None => log::warn!("RGB camera unavailable, skipping RGB frame"),
+    }
+
+    match thermal_image {
+        Some(image) => transmit_frame("thermal", image, debug),
+        None => log::warn!("Thermal camera unavailable, skipping thermal frame"),
+    }
+
+    log::info!("USB-C: frames sent");
+}
+
+fn transmit_frame(name: &str, image: Image, debug: &DebugChannel) {
+    log::info!("USB-C: sending {name} frame...");
+    if let Err(e) = debug.send_image(name, image.width(), image.height(), image) {
+        log::error!("USB-C {name} frame send failed: {e}");
+    }
 }
 
 // Magic header recognised by local/capture_frame_via_usb_c.sh
@@ -43,7 +80,7 @@ impl DebugChannel {
 
     /// Drain whatever is waiting on USB-C stdin and report whether the capture
     /// trigger token has arrived since the last call. Non-blocking.
-    pub fn poll_trigger(&mut self) -> bool {
+    pub fn capture_has_been_triggered(&mut self) -> bool {
         let mut tmp = [0u8; 64];
         loop {
             // ticks_to_wait = 0 → non-blocking; returns the number of bytes drained.
