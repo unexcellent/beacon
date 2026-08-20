@@ -4,6 +4,5 @@
 pub mod audio;
 pub mod camera;
 pub mod csp_arch;
-pub mod debug;
 pub mod kiss;
 pub mod link;
