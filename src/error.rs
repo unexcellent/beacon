@@ -21,6 +21,8 @@ pub enum Error {
     ThermalInit,
     /// Raised when an error with the UART interface occurs.
     UartAllocation,
+    /// Raised when a firmware update fails or is aborted.
+    Update,
 }
 
 impl fmt::Display for Error {
@@ -34,6 +36,7 @@ impl fmt::Display for Error {
             Self::RgbInit => write!(f, "rgb camera initialization failed"),
             Self::ThermalInit => write!(f, "thermal camera initialization failed"),
             Self::UartAllocation => write!(f, "UART initialization failed"),
+            Self::Update => write!(f, "firmware update failed"),
         }
     }
 }

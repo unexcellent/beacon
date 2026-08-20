@@ -1,7 +1,7 @@
 mod devices;
 mod error;
-mod ota;
 mod transmit_sstv;
+mod update;
 
 use devices::audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
 use devices::camera::{MIPI, RgbCamera, SC850SL, ThermalCamera};
@@ -9,6 +9,7 @@ use devices::debug::{DebugChannel, transmit_usb};
 use devices::link::{Command, Message, PayloadLink};
 use error::{Error, ReportIfErr, Result};
 use transmit_sstv::transmit_sstv;
+use update::update;
 
 use esp_idf_hal::{delay, peripherals::Peripherals};
 
@@ -60,7 +61,6 @@ fn main() {
 
     loop {
         if debug.capture_has_been_triggered() {
-            log::info!("USB-C: capture trigger received");
             transmit_usb(&debug, rgb.as_mut().ok(), thermal.as_mut().ok());
         }
 
@@ -75,6 +75,12 @@ fn main() {
                     )
                     .report_if_err(&link);
                     link.send(Message::Available);
+                }
+                Command::UpdateAnnounced(chunk_size) => {
+                    let _ = update(chunk_size, &mut link).report_if_err(&link);
+                }
+                Command::UpdateBegin(_) | Command::UpdateData { .. } | Command::UpdateEnd => {
+                    log::warn!("OTA: no update announced, ignoring");
                 }
             }
         }

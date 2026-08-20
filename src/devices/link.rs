@@ -11,7 +11,6 @@ use esp_idf_hal::{
 use std::borrow::Cow;
 
 use crate::devices::kiss;
-use crate::ota::OtaState;
 use crate::{Error, Result};
 
 pub const BAUD_RATE: u32 = 115_200;
@@ -27,10 +26,25 @@ const OBC_PORT: u8 = 1;
 const UHF_GROUND_NODE: u16 = 2;
 const UHF_GROUND_PORT: u8 = 1;
 
+// OTA wire protocol: first payload byte selects the command, the rest is
+// little-endian command data.
+const OTA_CMD_ANNOUNCE: u8 = 0x00;
+const OTA_CMD_BEGIN: u8 = 0x01;
+const OTA_CMD_DATA: u8 = 0x02;
+const OTA_CMD_END: u8 = 0x03;
+
 /// A command received from the payload board, returned by [`PayloadLink::poll`]
 /// for the application to execute.
 pub enum Command {
     Sstv,
+    /// A firmware update was announced with the given chunk size.
+    UpdateAnnounced(u16),
+    /// A firmware update session starts, expecting this many bytes in total.
+    UpdateBegin(u32),
+    /// One block of firmware bytes starting at `offset`.
+    UpdateData { offset: u32, data: Vec<u8> },
+    /// The sender considers the firmware transfer complete.
+    UpdateEnd,
 }
 
 /// libcsp interface owning the UART TX half: outgoing packets are KISS-encoded
@@ -132,7 +146,6 @@ pub struct PayloadLink {
     ota_sock: libcsp::Socket,
     cmd_sock: libcsp::Socket,
     decoder: kiss::KissDecoder,
-    ota: OtaState,
     /// RS422 full-duplex: the TX driver-enable pin is held high for the lifetime
     /// of the link. Kept as a field so it is not dropped (which would reset the
     /// pin and disable the transmitter).
@@ -195,7 +208,6 @@ impl PayloadLink {
             ota_sock,
             cmd_sock,
             decoder: kiss::KissDecoder::new(),
-            ota: OtaState::new(),
             _de: de,
         })
     }
@@ -229,7 +241,6 @@ impl PayloadLink {
         self.pump_rx();
         let _ = self.node.route_work();
         self.service_ping();
-        self.service_ota();
         self.collect_commands()
     }
 
@@ -255,13 +266,13 @@ impl PayloadLink {
         }
     }
 
-    /// Log one received packet, except while an OTA write is in progress (hundreds
-    /// of data chunks would flood the console).
+    /// Log one received packet, except OTA data chunks (hundreds of them during a
+    /// firmware transfer would flood the console).
     fn log_rx_packet(&self, pkt: &libcsp::Packet) {
-        if matches!(self.ota, OtaState::Writing(_)) {
+        let id = pkt.id();
+        if id.dport == OTA_PORT && pkt.data().first() == Some(&OTA_CMD_DATA) {
             return;
         }
-        let id = pkt.id();
         let (src, sport, dst, dport, flags) = (id.src, id.sport, id.dst, id.dport, id.flags);
         log::info!(
             "[UART RX] from {}:{} to {}:{} is {} (flags 0x{:02x}, len={})",
@@ -284,18 +295,17 @@ impl PayloadLink {
         }
     }
 
-    /// Feed firmware-update packets into the OTA state machine.
-    fn service_ota(&mut self) {
-        while let Some(conn) = self.ota_sock.accept(0) {
-            while let Some(pkt) = conn.read(0) {
-                self.ota.handle(pkt.data());
-            }
-        }
-    }
-
-    /// Drain the command socket and return the recognized application commands.
+    /// Drain the OTA and command sockets and return the recognized application
+    /// commands.
     fn collect_commands(&mut self) -> Vec<Command> {
         let mut commands = Vec::new();
+        while let Some(conn) = self.ota_sock.accept(0) {
+            while let Some(pkt) = conn.read(0) {
+                if let Some(cmd) = parse_ota_packet(pkt.data()) {
+                    commands.push(cmd);
+                }
+            }
+        }
         while let Some(conn) = self.cmd_sock.accept(0) {
             while let Some(pkt) = conn.read(0) {
                 if pkt.data().starts_with(b"SSTV") {
@@ -307,5 +317,43 @@ impl PayloadLink {
             }
         }
         commands
+    }
+}
+
+/// Parse one packet from the OTA socket into a [`Command`], or None (with a log)
+/// if it is malformed.
+fn parse_ota_packet(payload: &[u8]) -> Option<Command> {
+    match *payload.first()? {
+        OTA_CMD_ANNOUNCE => {
+            let chunk_size = match payload.get(1..3) {
+                Some(b) => u16::from_le_bytes([b[0], b[1]]),
+                None => 0,
+            };
+            Some(Command::UpdateAnnounced(chunk_size))
+        }
+        OTA_CMD_BEGIN => match payload.get(1..5) {
+            Some(b) => Some(Command::UpdateBegin(u32::from_le_bytes([
+                b[0], b[1], b[2], b[3],
+            ]))),
+            None => {
+                log::error!("OTA BEGIN: payload too short ({} bytes)", payload.len() - 1);
+                None
+            }
+        },
+        OTA_CMD_DATA => match payload.get(1..5) {
+            Some(b) if payload.len() > 5 => Some(Command::UpdateData {
+                offset: u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                data: payload[5..].to_vec(),
+            }),
+            _ => {
+                log::error!("OTA DATA: payload too short ({} bytes)", payload.len() - 1);
+                None
+            }
+        },
+        OTA_CMD_END => Some(Command::UpdateEnd),
+        cmd => {
+            log::warn!("OTA: unknown command 0x{cmd:02x}");
+            None
+        }
     }
 }

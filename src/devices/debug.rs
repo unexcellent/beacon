@@ -24,6 +24,7 @@ pub fn transmit_usb(
     rgb: Option<&mut RgbCamera>,
     thermal: Option<&mut ThermalCamera>,
 ) {
+    log::info!("USB-C: capture trigger received");
     let rgb_image = capture_image(rgb);
     let thermal_image = capture_image(thermal);
 
