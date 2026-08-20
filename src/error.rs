@@ -5,6 +5,8 @@ use crate::devices::link::{Message, PayloadLink};
 /// Crate-wide error type wrapping the errors of the underlying drivers.
 #[derive(Clone)]
 pub enum Error {
+    /// Raised if all cameras failed to initialize.
+    AllCamerasInit,
     /// Raised if the audio channel failed to initilize.
     AudioInit,
     /// Raised when an error with creating the libcsp node occurred.
@@ -22,6 +24,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AllCamerasInit => write!(f, "all cameras failed to initialize"),
             Self::AudioInit => write!(f, "audio channel initialization failed"),
             Self::CspInit => write!(f, "csp initialization failed"),
             Self::Peripheral => write!(f, "peripheral allocation failed"),
