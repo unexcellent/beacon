@@ -18,39 +18,51 @@ const OTA_WITH_SEQUENTIAL_WRITES: usize = 0xFFFFFFFE;
 /// link until the transfer completes (which reboots into the new firmware) or
 /// fails. SSTV commands received in the meantime are ignored; ping stays alive
 /// since it is serviced inside [`PayloadLink::poll`].
-pub fn update(mut chunk_size: u16, link: &mut PayloadLink) -> Result<()> {
+pub fn update(chunk_size: u16, link: &mut PayloadLink) -> Result<()> {
     log::info!("OTA: update announced (chunk_size={chunk_size})");
-    let mut writer: Option<Writer> = None;
+    let mut state = UpdateState::Announced;
 
     loop {
         for cmd in link.poll() {
             match cmd {
                 Command::UpdateAnnounced(size) => {
-                    if writer.take().is_some() {
-                        log::warn!("OTA: aborting in-progress session on new announce");
-                    }
-                    chunk_size = size;
-                    log::info!("OTA: update announced (chunk_size={chunk_size})");
+                    log::warn!("OTA: aborting in-progress session on new announce");
+                    update(size, link)?;
                 }
-                Command::UpdateBegin(total) => {
-                    if writer.take().is_some() {
-                        log::warn!("OTA: aborting previous session");
-                    }
-                    writer = Some(Writer::begin(total, chunk_size)?);
-                }
-                Command::UpdateData { offset, data } => match writer.as_mut() {
-                    Some(w) => {
-                        if let Err(e) = w.write_data(offset, &data) {
-                            return Err(e);
-                        }
-                    }
-                    None => log::warn!("OTA DATA: no active session"),
-                },
-                Command::UpdateEnd => match writer.take() {
-                    Some(w) => w.finish()?,
-                    None => log::warn!("OTA END: no active session"),
-                },
+                Command::UpdateBegin(total) => state.begin(total, chunk_size)?,
+                Command::UpdateData { offset, data } => state.write_data(offset, &data)?,
+                Command::UpdateEnd => state.finish()?,
                 _ => log::warn!("command ignored during firmware update"),
+            }
+        }
+    }
+}
+
+enum UpdateState {
+    Announced,
+    InProgress(Writer),
+    Done,
+}
+
+impl UpdateState {
+    pub fn begin(&mut self, total: u32, chunk_size: u16) -> Result<()> {
+        *self = Self::InProgress(Writer::begin(total, chunk_size)?);
+        Ok(())
+    }
+
+    pub fn write_data(&mut self, base_offset: u32, raw: &[u8]) -> Result<()> {
+        match self {
+            Self::InProgress(writer) => writer.write_data(base_offset, raw),
+            _ => Err(Error::UpdateNotInProgress),
+        }
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        match core::mem::replace(self, Self::Done) {
+            Self::InProgress(writer) => writer.finish(),
+            state => {
+                *self = state;
+                Err(Error::UpdateNotInProgress)
             }
         }
     }
@@ -66,7 +78,7 @@ struct Writer {
 }
 
 impl Writer {
-    fn begin(total: u32, chunk_size: u16) -> Result<Self> {
+    pub fn begin(total: u32, chunk_size: u16) -> Result<Self> {
         unsafe {
             let partition = esp_ota_get_next_update_partition(ptr::null());
             if partition.is_null() {
@@ -95,7 +107,7 @@ impl Writer {
     }
 
     /// Validate and flash one DATA payload starting at `base_offset`.
-    fn write_data(&mut self, base_offset: u32, raw: &[u8]) -> Result<()> {
+    pub fn write_data(&mut self, base_offset: u32, raw: &[u8]) -> Result<()> {
         if base_offset != self.received {
             log::error!(
                 "OTA DATA: gap detected — expected offset {:#x}, got {:#x} — aborting",
@@ -186,7 +198,7 @@ impl Writer {
     }
 
     /// Verify completeness, validate the image and reboot into it.
-    fn finish(self) -> Result<()> {
+    pub fn finish(self) -> Result<()> {
         if self.received != self.total {
             log::error!(
                 "OTA END: incomplete — received {} of {} bytes — aborting",

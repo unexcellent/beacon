@@ -23,6 +23,8 @@ pub enum Error {
     UartAllocation,
     /// Raised when a firmware update fails or is aborted.
     Update,
+    /// Raised when an update data package is received but no update is in progress.
+    UpdateNotInProgress,
 }
 
 impl fmt::Display for Error {
@@ -37,6 +39,9 @@ impl fmt::Display for Error {
             Self::ThermalInit => write!(f, "thermal camera initialization failed"),
             Self::UartAllocation => write!(f, "UART initialization failed"),
             Self::Update => write!(f, "firmware update failed"),
+            Self::UpdateNotInProgress => {
+                write!(f, "update chunk received but no update in progress")
+            }
         }
     }
 }
