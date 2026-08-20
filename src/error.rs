@@ -3,11 +3,19 @@ use core::fmt;
 use crate::devices::link::{Message, PayloadLink};
 
 /// Crate-wide error type wrapping the errors of the underlying drivers.
-#[derive(Clone)]
+///
+/// The derived Debug output (variant name plus any fields) doubles as the
+/// ground-report wire format of [`Message::Error`] — renaming a variant is a
+/// protocol change, ground tooling may parse these names.
+#[derive(Clone, Debug)]
+// The tuple fields are only ever read through the derived Debug impl (which the
+// dead_code lint does not count as a use), but they are downlinked in every
+// ground report.
+#[allow(dead_code)]
 pub enum Error {
     /// Raised if all cameras failed to initialize.
     AllCamerasInit,
-    /// Raised if the audio channel failed to initilize.
+    /// Raised if the audio channel failed to initialize.
     AudioInit,
     /// Raised when writing samples to the I2S channel fails.
     AudioTransmission,
@@ -15,9 +23,9 @@ pub enum Error {
     CspInit,
     /// Raised when an error with the ESP32 hardware occurred.
     Peripheral,
-    /// Raised if the RGB camera failed to initilize.
+    /// Raised if the RGB camera failed to initialize.
     RgbInit,
-    /// Raised if the thermal camera failed to initilize.
+    /// Raised if the thermal camera failed to initialize.
     ThermalInit,
     /// Raised when an error with the UART interface occurs.
     UartAllocation,
@@ -25,55 +33,32 @@ pub enum Error {
     UartReceive,
     /// Raised if the update session could not be started.
     UpdateBegin,
+    /// Raised if a mid-transfer chunk is shorter than the announced chunk size.
+    /// Fields: chunk offset, received length, expected length.
     UpdateChunkIncomplete(u32, u32, u32),
+    /// Raised if the fully received image fails validation or could not be
+    /// activated as the boot partition.
     UpdateCorrupt,
+    /// Raised if the update ends before all bytes arrived.
+    /// Fields: received bytes, expected total bytes.
     UpdateIncomplete(u32, u32),
     /// Raised when an update data package is received but no update is in progress.
     UpdateNotInProgress,
     /// Raised if no update partition could be created.
     UpdatePartition,
     /// Raised if the offset of an update package is not as expected.
+    /// Fields: expected offset (bytes flashed so far), received offset.
     UpdatePackageOffset(u32, u32),
+    /// Raised if writing a chunk to flash fails.
+    /// Fields: chunk offset, raw esp-idf error code.
     UpdateWrite(u32, i32),
 }
 
+/// Forwards to the derived [`Debug`](fmt::Debug), so that logs, `expect`
+/// panics and the ground report all show the same variant-name format.
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AllCamerasInit => write!(f, "all cameras failed to initialize"),
-            Self::AudioInit => write!(f, "audio channel initialization failed"),
-            Self::AudioTransmission => write!(f, "audio transmission failed"),
-            Self::CspInit => write!(f, "csp initialization failed"),
-            Self::Peripheral => write!(f, "peripheral allocation failed"),
-            Self::RgbInit => write!(f, "rgb camera initialization failed"),
-            Self::ThermalInit => write!(f, "thermal camera initialization failed"),
-            Self::UartAllocation => write!(f, "UART initialization failed"),
-            Self::UartReceive => write!(f, "UART receive failed"),
-            Self::UpdateBegin => write!(f, "update begin failed"),
-            Self::UpdateCorrupt => write!(f, "update corrupt"),
-            Self::UpdateChunkIncomplete(offset, is, should) => write!(
-                f,
-                "chunk {:#x} incomplete (is={}, should={})",
-                offset, is, should
-            ),
-            Self::UpdateIncomplete(is, should) => {
-                write!(f, "update incomplete (is={}, should={})", is, should)
-            }
-            Self::UpdateNotInProgress => write!(f, "update not announced or begun"),
-            Self::UpdatePartition => write!(f, "update partition could not be created"),
-            Self::UpdatePackageOffset(is, should) => write!(f, "is: {}, should: {}", is, should),
-            Self::UpdateWrite(offset, error_code) => {
-                write!(f, "at: {}, is: {}", offset, error_code)
-            }
-        }
-    }
-}
-
-/// Forwards to [`Display`](fmt::Display) so that `expect`/`unwrap` panics show
-/// the human-readable message instead of the variant structure.
-impl fmt::Debug for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
+        fmt::Debug::fmt(self, f)
     }
 }
 
