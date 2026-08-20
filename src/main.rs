@@ -11,21 +11,7 @@ use error::{Error, ReportIfErr, Result};
 use transmit_sstv::transmit_sstv;
 use update::update;
 
-use esp_idf_hal::{delay, peripherals::Peripherals};
-
-/// Firmware identity for ground validation: app version + ELF SHA-256 (hex).
-/// The SHA-256 is stamped into the image by the build, so it uniquely
-/// identifies the exact firmware binary currently running.
-fn firmware_id() -> String {
-    let desc = unsafe { &*esp_idf_svc::sys::esp_app_get_description() };
-    let version = unsafe { std::ffi::CStr::from_ptr(desc.version.as_ptr()) }.to_string_lossy();
-    let sha: String = desc
-        .app_elf_sha256
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    format!("FW: {version} sha256={sha}")
-}
+use esp_idf_hal::peripherals::Peripherals;
 
 fn initialize_esp32() -> Result<Peripherals> {
     esp_idf_svc::sys::link_patches();
@@ -42,7 +28,10 @@ fn initialize_payload_link(peripherals: Peripherals) -> Result<PayloadLink> {
         peripherals.pins.gpio39,
     )?;
 
-    link.send(Message::Booted(firmware_id()));
+    let description = unsafe { &*esp_idf_svc::sys::esp_app_get_description() };
+    let version =
+        unsafe { std::ffi::CStr::from_ptr(description.version.as_ptr()) }.to_string_lossy();
+    link.send(Message::Booted(format!("{version}")));
 
     Ok(link)
 }
@@ -64,20 +53,21 @@ fn main() {
             transmit_usb(&debug, rgb.as_mut().ok(), thermal.as_mut().ok());
         }
 
-        match link.receive() {
-            Some(Command::Sstv) => {
+        match link.receive().report_if_err(&link) {
+            Ok(Some(Command::Sstv)) => {
                 link.send(Message::Busy);
-                let _ = transmit_sstv(rgb.as_mut().ok(), thermal.as_mut().ok(), audio.as_mut().ok())
-                    .report_if_err(&link);
+                let _ = transmit_sstv(
+                    rgb.as_mut().ok(),
+                    thermal.as_mut().ok(),
+                    audio.as_mut().ok(),
+                )
+                .report_if_err(&link);
                 link.send(Message::Available);
             }
-            Some(Command::UpdateAnnounced(chunk_size)) => {
+            Ok(Some(Command::UpdateAnnounced(chunk_size))) => {
                 let _ = update(chunk_size, &mut link).report_if_err(&link);
             }
-            Some(_) => log::warn!("OTA: no update announced, ignoring"),
-            None => (),
+            _ => (),
         }
-
-        delay::FreeRtos::delay_ms(1);
     }
 }

@@ -21,7 +21,7 @@ pub fn update(chunk_size: u16, link: &mut PayloadLink) -> Result<()> {
     let mut state = UpdateState::Announced;
 
     loop {
-        match link.receive() {
+        match link.receive()? {
             Some(Command::UpdateAnnounced(size)) => {
                 log::warn!("OTA: aborting in-progress session on new announce");
                 update(size, link)?;

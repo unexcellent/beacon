@@ -21,6 +21,8 @@ pub enum Error {
     ThermalInit,
     /// Raised when an error with the UART interface occurs.
     UartAllocation,
+    /// Raised when reading from the UART fails.
+    UartReceive,
     /// Raised if the update session could not be started.
     UpdateBegin,
     UpdateChunkIncomplete(u32, u32, u32),
@@ -46,6 +48,7 @@ impl fmt::Display for Error {
             Self::RgbInit => write!(f, "rgb camera initialization failed"),
             Self::ThermalInit => write!(f, "thermal camera initialization failed"),
             Self::UartAllocation => write!(f, "UART initialization failed"),
+            Self::UartReceive => write!(f, "UART receive failed"),
             Self::UpdateBegin => write!(f, "update begin failed"),
             Self::UpdateCorrupt => write!(f, "update corrupt"),
             Self::UpdateChunkIncomplete(offset, is, should) => write!(

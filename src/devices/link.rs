@@ -27,6 +27,11 @@ const OBC_PORT: u8 = 1;
 const UHF_GROUND_NODE: u16 = 2;
 const UHF_GROUND_PORT: u8 = 1;
 
+/// Consecutive UART read failures tolerated before [`PayloadLink::receive`]
+/// reports an [`Error::UartReceive`]. With the 100 ms retry pacing this means
+/// one report per second of persistent failure.
+const MAX_RX_ERRORS: u32 = 10;
+
 // OTA wire protocol: first payload byte selects the command, the rest is
 // little-endian command data.
 const OTA_CMD_ANNOUNCE: u8 = 0x00;
@@ -152,6 +157,8 @@ pub struct PayloadLink {
     decoder: kiss::KissDecoder,
     /// Commands already received but not yet handed out by [`Self::receive_command`].
     commands: VecDeque<Command>,
+    /// Consecutive UART read failures, reset by every successful read.
+    rx_errors: u32,
     /// RS422 full-duplex: the TX driver-enable pin is held high for the lifetime
     /// of the link. Kept as a field so it is not dropped (which would reset the
     /// pin and disable the transmitter).
@@ -215,6 +222,7 @@ impl PayloadLink {
             cmd_sock,
             decoder: kiss::KissDecoder::new(),
             commands: VecDeque::new(),
+            rx_errors: 0,
             _de: de,
         })
     }
@@ -246,28 +254,35 @@ impl PayloadLink {
     /// the link once (UART bytes through KISS into CSP, router, ping service),
     /// waiting up to the UART read timeout for traffic — so it is intended to
     /// be called in a `while let Some(cmd)` loop, not a `for` loop.
-    pub fn receive(&mut self) -> Option<Command> {
+    pub fn receive(&mut self) -> Result<Option<Command>> {
         if let Some(cmd) = self.commands.pop_front() {
-            return Some(cmd);
+            return Ok(Some(cmd));
         }
-        self.pump_rx();
+        self.pump_rx()?;
         let _ = self.node.route_work();
         self.service_ping();
         self.collect_commands();
-        self.commands.pop_front()
+        Ok(self.commands.pop_front())
     }
 
     /// Feed received UART bytes through the KISS decoder and inject every
-    /// complete CSP packet into libcsp's input queue.
-    fn pump_rx(&mut self) {
+    /// complete CSP packet into libcsp's input queue. Fails with
+    /// [`Error::UartReceive`] when the UART read itself errors.
+    fn pump_rx(&mut self) -> Result<()> {
         let mut buf = [0u8; 512];
-        // Poll the RS485 read with a short timeout (rather than blocking forever) so
-        // the main loop also gets to service the USB-C debug trigger each iteration.
-        let read_timeout = delay::TickType::new_millis(100).ticks();
 
+        let read_timeout = delay::TickType::new_millis(100).ticks();
         let Ok(n) = self.rx.read(&mut buf, read_timeout) else {
-            return;
+            self.rx_errors += 1;
+
+            delay::FreeRtos::delay_ms(100);
+            if self.rx_errors >= MAX_RX_ERRORS {
+                self.rx_errors = 0;
+                return Err(Error::UartReceive);
+            }
+            return Ok(());
         };
+        self.rx_errors = 0;
         for &b in &buf[..n] {
             let Some(frame) = self.decoder.push(b) else {
                 continue;
@@ -277,6 +292,7 @@ impl PayloadLink {
                 self.iface.rx(pkt);
             }
         }
+        Ok(())
     }
 
     /// Log one received packet, except OTA data chunks (hundreds of them during a
