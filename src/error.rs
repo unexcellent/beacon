@@ -1,6 +1,6 @@
 use core::fmt;
 
-use crate::link::{Message, PayloadLink};
+use crate::devices::link::{Message, PayloadLink};
 
 /// Crate-wide error type wrapping the errors of the underlying drivers.
 #[derive(Clone)]

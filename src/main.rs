@@ -1,17 +1,12 @@
-mod audio;
-mod camera;
-mod csp_arch;
-mod debug;
+mod devices;
 mod error;
-mod kiss;
-mod link;
 mod ota;
 
-use audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
-use camera::{MIPI, RgbCamera, SC850SL, ThermalCamera, capture_both};
-use debug::DebugChannel;
+use devices::audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
+use devices::camera::{MIPI, RgbCamera, SC850SL, ThermalCamera, capture_both};
+use devices::debug::DebugChannel;
+use devices::link::{Command, Message, PayloadLink};
 use error::{Error, ReportIfErr, Result};
-use link::{Command, Message, PayloadLink};
 use sstv::{Encoder, Mode, RgbPixel, Synthesizer};
 
 use esp_idf_hal::{delay, peripherals::Peripherals};

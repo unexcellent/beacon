@@ -10,7 +10,7 @@ use esp_idf_hal::{
 
 use std::borrow::Cow;
 
-use crate::kiss;
+use crate::devices::kiss;
 use crate::ota::OtaState;
 use crate::{Error, Result};
 
