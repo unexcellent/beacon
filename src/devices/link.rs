@@ -9,6 +9,7 @@ use esp_idf_hal::{
 };
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 
 use crate::devices::kiss;
 use crate::{Error, Result};
@@ -42,7 +43,10 @@ pub enum Command {
     /// A firmware update session starts, expecting this many bytes in total.
     UpdateBegin(u32),
     /// One block of firmware bytes starting at `offset`.
-    UpdateData { offset: u32, data: Vec<u8> },
+    UpdateData {
+        offset: u32,
+        data: Vec<u8>,
+    },
     /// The sender considers the firmware transfer complete.
     UpdateEnd,
 }
@@ -146,6 +150,8 @@ pub struct PayloadLink {
     ota_sock: libcsp::Socket,
     cmd_sock: libcsp::Socket,
     decoder: kiss::KissDecoder,
+    /// Commands already received but not yet handed out by [`Self::receive_command`].
+    commands: VecDeque<Command>,
     /// RS422 full-duplex: the TX driver-enable pin is held high for the lifetime
     /// of the link. Kept as a field so it is not dropped (which would reset the
     /// pin and disable the transmitter).
@@ -208,6 +214,7 @@ impl PayloadLink {
             ota_sock,
             cmd_sock,
             decoder: kiss::KissDecoder::new(),
+            commands: VecDeque::new(),
             _de: de,
         })
     }
@@ -234,14 +241,20 @@ impl PayloadLink {
         }
     }
 
-    /// Pump the link once: feed received UART bytes through KISS into CSP, run
-    /// the router, service the ping and OTA sockets internally, and return the
-    /// application commands that arrived.
-    pub fn poll(&mut self) -> Vec<Command> {
+    /// Return the next command received from the payload board, or None if
+    /// currently none is pending. When the internal queue is empty this pumps
+    /// the link once (UART bytes through KISS into CSP, router, ping service),
+    /// waiting up to the UART read timeout for traffic — so it is intended to
+    /// be called in a `while let Some(cmd)` loop, not a `for` loop.
+    pub fn receive(&mut self) -> Option<Command> {
+        if let Some(cmd) = self.commands.pop_front() {
+            return Some(cmd);
+        }
         self.pump_rx();
         let _ = self.node.route_work();
         self.service_ping();
-        self.collect_commands()
+        self.collect_commands();
+        self.commands.pop_front()
     }
 
     /// Feed received UART bytes through the KISS decoder and inject every
@@ -295,14 +308,12 @@ impl PayloadLink {
         }
     }
 
-    /// Drain the OTA and command sockets and return the recognized application
-    /// commands.
-    fn collect_commands(&mut self) -> Vec<Command> {
-        let mut commands = Vec::new();
+    /// Drain the OTA and command sockets into the internal command queue.
+    fn collect_commands(&mut self) {
         while let Some(conn) = self.ota_sock.accept(0) {
             while let Some(pkt) = conn.read(0) {
                 if let Some(cmd) = parse_ota_packet(pkt.data()) {
-                    commands.push(cmd);
+                    self.commands.push_back(cmd);
                 }
             }
         }
@@ -310,13 +321,12 @@ impl PayloadLink {
             while let Some(pkt) = conn.read(0) {
                 if pkt.data().starts_with(b"SSTV") {
                     log::info!("CMD: SSTV requested");
-                    commands.push(Command::Sstv);
+                    self.commands.push_back(Command::Sstv);
                 } else {
                     log::warn!("CMD: unknown payload: {}", kiss::fmt_payload(pkt.data()));
                 }
             }
         }
-        commands
     }
 }
 

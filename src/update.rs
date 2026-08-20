@@ -21,17 +21,16 @@ pub fn update(chunk_size: u16, link: &mut PayloadLink) -> Result<()> {
     let mut state = UpdateState::Announced;
 
     loop {
-        for cmd in link.poll() {
-            match cmd {
-                Command::UpdateAnnounced(size) => {
-                    log::warn!("OTA: aborting in-progress session on new announce");
-                    update(size, link)?;
-                }
-                Command::UpdateBegin(total) => state.begin(total, chunk_size)?,
-                Command::UpdateData { offset, data } => state.write_data(offset, &data)?,
-                Command::UpdateEnd => state.finish()?,
-                _ => log::warn!("command ignored during firmware update"),
+        match link.receive() {
+            Some(Command::UpdateAnnounced(size)) => {
+                log::warn!("OTA: aborting in-progress session on new announce");
+                update(size, link)?;
             }
+            Some(Command::UpdateBegin(total)) => state.begin(total, chunk_size)?,
+            Some(Command::UpdateData { offset, data }) => state.write_data(offset, &data)?,
+            Some(Command::UpdateEnd) => state.finish()?,
+            Some(_) => log::warn!("command ignored during firmware update"),
+            None => continue,
         }
     }
 }

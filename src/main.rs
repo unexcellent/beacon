@@ -64,25 +64,18 @@ fn main() {
             transmit_usb(&debug, rgb.as_mut().ok(), thermal.as_mut().ok());
         }
 
-        for cmd in link.poll() {
-            match cmd {
-                Command::Sstv => {
-                    link.send(Message::Busy);
-                    let _ = transmit_sstv(
-                        rgb.as_mut().ok(),
-                        thermal.as_mut().ok(),
-                        audio.as_mut().ok(),
-                    )
+        match link.receive() {
+            Some(Command::Sstv) => {
+                link.send(Message::Busy);
+                let _ = transmit_sstv(rgb.as_mut().ok(), thermal.as_mut().ok(), audio.as_mut().ok())
                     .report_if_err(&link);
-                    link.send(Message::Available);
-                }
-                Command::UpdateAnnounced(chunk_size) => {
-                    let _ = update(chunk_size, &mut link).report_if_err(&link);
-                }
-                Command::UpdateBegin(_) | Command::UpdateData { .. } | Command::UpdateEnd => {
-                    log::warn!("OTA: no update announced, ignoring");
-                }
+                link.send(Message::Available);
             }
+            Some(Command::UpdateAnnounced(chunk_size)) => {
+                let _ = update(chunk_size, &mut link).report_if_err(&link);
+            }
+            Some(_) => log::warn!("OTA: no update announced, ignoring"),
+            None => (),
         }
 
         delay::FreeRtos::delay_ms(1);
