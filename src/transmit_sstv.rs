@@ -7,9 +7,8 @@ use sstv::{Encoder, Mode, Synthesizer};
 pub fn transmit_sstv(
     rgb: Option<&mut RgbCamera>,
     thermal: Option<&mut ThermalCamera>,
-    audio: Option<&mut AudioChannel>,
+    audio: &mut AudioChannel,
 ) -> Result<()> {
-    let audio = audio.ok_or(Error::AudioInit)?;
     if rgb.is_none() && thermal.is_none() {
         return Err(Error::AllCamerasInit);
     }

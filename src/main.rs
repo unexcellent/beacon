@@ -15,9 +15,9 @@ use esp_idf_hal::peripherals::Peripherals;
 fn main() {
     let peripherals = initialize_esp32().unwrap();
     let mut link = initialize_payload_link(peripherals).unwrap();
+    let mut audio = initialize_audio_channel().report_if_err(&link).unwrap();
     let mut rgb = initialize_rgb_camera().report_if_err(&link);
     let mut thermal = initialize_thermal_camera().report_if_err(&link);
-    let mut audio = initialize_audio_channel().report_if_err(&link);
 
     link.send(Message::Available);
 
@@ -25,12 +25,8 @@ fn main() {
         match link.receive().report_if_err(&link) {
             Ok(Some(Command::Sstv)) => {
                 link.send(Message::Busy);
-                let _ = transmit_sstv(
-                    rgb.as_mut().ok(),
-                    thermal.as_mut().ok(),
-                    audio.as_mut().ok(),
-                )
-                .report_if_err(&link);
+                let _ = transmit_sstv(rgb.as_mut().ok(), thermal.as_mut().ok(), &mut audio)
+                    .report_if_err(&link);
                 link.send(Message::Available);
             }
             Ok(Some(Command::UpdateAnnounced(chunk_size))) => {
