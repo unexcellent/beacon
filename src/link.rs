@@ -1,23 +1,23 @@
-//! The CSP-over-KISS-over-RS422 link to the payload board: UART setup, the
-//! libcsp interface and service sockets, and the per-iteration RX pump.
+//! The mission protocol spoken over the CSP payload link: the network map
+//! (which node/port carries what), the message and command formats, and the
+//! RX pump with its error policy. The generic CSP-over-KISS engine lives in
+//! [`beacon::csp`](beacon::csp).
 
 use esp_idf_hal::{
     delay,
-    gpio::{AnyIOPin, Gpio37, Gpio38, Gpio39, Output, PinDriver},
-    uart::{self, UART1, UartDriver, UartRxDriver, UartTxDriver},
-    units::Hertz,
+    gpio::{Output, PinDriver},
+    uart::UartRxDriver,
 };
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
 
-use crate::devices::kiss;
+use beacon::csp::CspLink;
+use beacon::kiss;
+
 use crate::{Error, Result};
 
-pub const BAUD_RATE: u32 = 115_200;
-
 pub const NODE: u16 = 7;
-const PING_PORT: u8 = 1;
 const OTA_PORT: u8 = 10;
 const CMD_PORT: u8 = 11;
 const PAYLOAD_NODE: u16 = 14;
@@ -39,8 +39,8 @@ const OTA_CMD_BEGIN: u8 = 0x01;
 const OTA_CMD_DATA: u8 = 0x02;
 const OTA_CMD_END: u8 = 0x03;
 
-/// A command received from the payload board, returned by [`PayloadLink::poll`]
-/// for the application to execute.
+/// A command received from the payload board, returned by
+/// [`PayloadLink::receive`] for the application to execute.
 pub enum Command {
     Sstv,
     /// A firmware update was announced with the given chunk size.
@@ -54,55 +54,6 @@ pub enum Command {
     },
     /// The sender considers the firmware transfer complete.
     UpdateEnd,
-}
-
-/// libcsp interface owning the UART TX half: outgoing packets are KISS-encoded
-/// and written to the wire directly from nexthop().
-struct KissUartIface {
-    tx: UartTxDriver<'static>,
-}
-
-impl KissUartIface {
-    /// Write all of `data` and block until the TX FIFO has drained.
-    fn send(&mut self, data: &[u8]) {
-        let mut sent = 0;
-        while sent < data.len() {
-            sent += self.tx.write(&data[sent..]).unwrap();
-        }
-        self.tx.wait_done(delay::BLOCK).unwrap();
-    }
-}
-
-impl libcsp::CspInterface for KissUartIface {
-    fn nexthop(&mut self, _via: u16, packet: libcsp::Packet, from_me: bool) {
-        if !from_me {
-            return;
-        }
-        let id = packet.id();
-        let (src, sport, dst, dport, flags) = (id.src, id.sport, id.dst, id.dport, id.flags);
-        log::info!(
-            "[UART TX] from {}:{} to {}:{} is {} (flags 0x{:02x})",
-            src,
-            sport,
-            dst,
-            dport,
-            kiss::fmt_payload(packet.data()),
-            flags
-        );
-        let word: u32 = ((id.pri as u32) << 30)
-            | ((id.src as u32) << 25)
-            | ((id.dst as u32) << 20)
-            | ((id.dport as u32) << 14)
-            | ((id.sport as u32) << 8)
-            | (id.flags as u32);
-        let mut raw = word.to_be_bytes().to_vec();
-        raw.extend_from_slice(packet.data());
-        self.send(&kiss::kiss_encode(&raw));
-    }
-
-    fn name(&self) -> &str {
-        "KISS"
-    }
 }
 
 /// Messages that can be transmitted via the payload link
@@ -148,14 +99,12 @@ impl Message {
 }
 
 pub struct PayloadLink {
+    csp: CspLink,
     rx: UartRxDriver<'static>,
-    node: libcsp::CspNode,
-    iface: libcsp::interface::InterfaceHandle,
-    ping_sock: libcsp::Socket,
     ota_sock: libcsp::Socket,
     cmd_sock: libcsp::Socket,
     decoder: kiss::KissDecoder,
-    /// Commands already received but not yet handed out by [`Self::receive_command`].
+    /// Commands already received but not yet handed out by [`Self::receive`].
     commands: VecDeque<Command>,
     /// Consecutive UART read failures, reset by every successful read.
     rx_errors: u32,
@@ -166,58 +115,19 @@ pub struct PayloadLink {
 }
 
 impl PayloadLink {
-    /// Bring up the RS422 UART, the CSP node with the KISS interface as the
-    /// default route, and the ping / OTA / command service sockets.
+    /// Wrap the brought-up CSP node and RX half with the OTA / command
+    /// service sockets. Hardware construction lives in the board module.
     pub fn try_new(
-        uart: UART1<'static>,
-        tx: Gpio38<'static>,
-        rx: Gpio37<'static>,
-        de: Gpio39<'static>,
+        csp: CspLink,
+        rx: UartRxDriver<'static>,
+        de: PinDriver<'static, Output>,
     ) -> Result<Self> {
-        let mut de = PinDriver::output(de).map_err(|_| Error::Peripheral)?;
-        de.set_high().map_err(|_| Error::Peripheral)?;
-
-        let driver = UartDriver::new(
-            uart,
-            tx,
-            rx,
-            Option::<AnyIOPin>::None,
-            Option::<AnyIOPin>::None,
-            &uart::config::Config::new()
-                .baudrate(Hertz(BAUD_RATE))
-                .rx_fifo_size(8192),
-        )
-        .map_err(|_| Error::UartAllocation)?;
-        let (uart_tx, uart_rx) = driver.into_split();
-
-        let node = libcsp::CspConfig::new()
-            .address(NODE)
-            .hostname("beacon")
-            .model("esp32p4")
-            .init()
-            .map_err(|_| Error::CspInit)?;
-
-        let iface = libcsp::interface::register(KissUartIface { tx: uart_tx });
-        // Stamp our node address on packets leaving this interface. libcsp fills the
-        // source from `snd_iface->addr` when it is 0, and `register()` zero-inits it,
-        // so without this outgoing traffic (e.g. AVAILABLE) is sent from address 0.
-        unsafe { (*iface.c_iface_ptr()).addr = NODE };
-        unsafe { libcsp::route::set_default(iface.c_iface_ptr()).map_err(|_| Error::CspInit)? };
-
-        let mut ping_sock = libcsp::Socket::new(libcsp::socket_opts::NONE);
-        ping_sock.bind(PING_PORT).map_err(|_| Error::CspInit)?;
-
-        let mut ota_sock = libcsp::Socket::new(libcsp::socket_opts::NONE);
-        ota_sock.bind(OTA_PORT).map_err(|_| Error::CspInit)?;
-
-        let mut cmd_sock = libcsp::Socket::new(libcsp::socket_opts::NONE);
-        cmd_sock.bind(CMD_PORT).map_err(|_| Error::CspInit)?;
+        let ota_sock = csp.bind(OTA_PORT).map_err(|_| Error::CspInit)?;
+        let cmd_sock = csp.bind(CMD_PORT).map_err(|_| Error::CspInit)?;
 
         Ok(Self {
-            rx: uart_rx,
-            node,
-            iface,
-            ping_sock,
+            csp,
+            rx,
             ota_sock,
             cmd_sock,
             decoder: kiss::KissDecoder::new(),
@@ -227,8 +137,8 @@ impl PayloadLink {
         })
     }
 
-    /// Transmit a message via the payload link. The interface's nexthop
-    /// KISS-encodes it and writes it to the UART before this returns.
+    /// Transmit a message via the payload link. It is KISS-encoded and written
+    /// to the UART before this returns.
     pub fn send(&self, message: Message) {
         log::info!(
             "Sending '{}' to {}:{}",
@@ -236,17 +146,12 @@ impl PayloadLink {
             message.node(),
             message.port()
         );
-        if let Some(mut pkt) = libcsp::Packet::get(0) {
-            pkt.write(&message.payload()).ok();
-            self.node.sendto(
-                libcsp::Priority::Norm,
-                message.node(),
-                message.port(),
-                0,
-                0,
-                pkt,
-            );
-        }
+        self.csp.send(
+            message.node(),
+            message.port(),
+            libcsp::Priority::Norm,
+            &message.payload(),
+        );
     }
 
     /// Return the next command received from the payload board, or None if
@@ -259,15 +164,13 @@ impl PayloadLink {
             return Ok(Some(cmd));
         }
         self.pump_rx()?;
-        let _ = self.node.route_work();
-        self.service_ping();
         self.collect_commands();
         Ok(self.commands.pop_front())
     }
 
     /// Feed received UART bytes through the KISS decoder and inject every
-    /// complete CSP packet into libcsp's input queue. Fails with
-    /// [`Error::UartReceive`] when the UART read itself errors.
+    /// complete CSP packet into the node. Fails with [`Error::UartReceive`]
+    /// when the UART read itself errors.
     fn pump_rx(&mut self) -> Result<()> {
         let mut buf = [0u8; 512];
 
@@ -287,9 +190,9 @@ impl PayloadLink {
             let Some(frame) = self.decoder.push(b) else {
                 continue;
             };
-            if let Some(pkt) = kiss::frame_to_packet(&frame) {
+            if let Some(pkt) = kiss::decode_packet(&frame) {
                 self.log_rx_packet(&pkt);
-                self.iface.rx(pkt);
+                self.csp.inject(pkt);
             }
         }
         Ok(())
@@ -313,15 +216,6 @@ impl PayloadLink {
             flags,
             pkt.data().len()
         );
-    }
-
-    /// Answer pings via libcsp's built-in service handler.
-    fn service_ping(&mut self) {
-        while let Some(conn) = self.ping_sock.accept(0) {
-            while let Some(pkt) = conn.read(0) {
-                conn.handle_service(pkt);
-            }
-        }
     }
 
     /// Drain the OTA and command sockets into the internal command queue.

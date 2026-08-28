@@ -1,4 +1,4 @@
-//! KISS framing codec and CSP packet (de)serialization for the UART link.
+//! KISS framing codec and CSP packet (de)serialization for serial links.
 
 const FEND: u8 = 0xC0;
 const FESC: u8 = 0xDB;
@@ -118,8 +118,22 @@ pub fn fmt_payload(bytes: &[u8]) -> String {
         .join(" ")
 }
 
+/// Serialize a CSP packet (big-endian header word + payload) for KISS transport.
+pub fn encode_packet(packet: &libcsp::Packet) -> Vec<u8> {
+    let id = packet.id();
+    let word: u32 = ((id.pri as u32) << 30)
+        | ((id.src as u32) << 25)
+        | ((id.dst as u32) << 20)
+        | ((id.dport as u32) << 14)
+        | ((id.sport as u32) << 8)
+        | (id.flags as u32);
+    let mut raw = word.to_be_bytes().to_vec();
+    raw.extend_from_slice(packet.data());
+    raw
+}
+
 /// Decode a KISS payload into a CSP Packet, or None if it is too short.
-pub fn frame_to_packet(frame: &[u8]) -> Option<libcsp::Packet> {
+pub fn decode_packet(frame: &[u8]) -> Option<libcsp::Packet> {
     if frame.len() < 4 {
         return None;
     }

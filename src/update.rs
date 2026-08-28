@@ -8,7 +8,7 @@ use esp_idf_sys::{
     esp_ota_handle_t, esp_ota_set_boot_partition, esp_ota_write, esp_partition_t, esp_restart,
 };
 
-use crate::devices::link::{Command, PayloadLink};
+use crate::link::{Command, PayloadLink};
 use crate::error::{Error, Result};
 
 const OTA_WITH_SEQUENTIAL_WRITES: usize = 0xFFFFFFFE;

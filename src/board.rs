@@ -11,9 +11,17 @@ use beacon::camera::esp::{
 use beacon::camera::sensor::CameraSensor;
 use beacon::camera::sensors::{Mi48, Sc850sl};
 use beacon::camera::{RgbCamera, ThermalCamera};
+use beacon::csp::{CspLink, CspLinkConfig};
+use esp_idf_hal::{
+    gpio::{AnyIOPin, PinDriver},
+    peripherals::Peripherals,
+    uart::{self, UartDriver},
+    units::Hertz,
+};
 use esp_idf_sys::*;
 
 use crate::error::{Error, Result};
+use crate::link::{NODE, PayloadLink};
 
 pub const OUTPUT_WIDTH: usize = sstv::Mode::Robot36.image_width() as usize;
 pub const OUTPUT_HEIGHT: usize = sstv::Mode::Robot36.image_height() as usize;
@@ -37,6 +45,42 @@ pub const PHILLIPS_I2S: AudioInterface = AudioInterface {
 
 pub fn initialize_audio_channel() -> Result<AudioChannel> {
     Ok(AudioChannel::try_new(PCM5102A, PHILLIPS_I2S)?)
+}
+
+// ── Payload link: CSP over KISS over RS422 (UART1) ───────────────────────────────
+
+pub const LINK_BAUD_RATE: u32 = 115_200;
+
+/// Bring up the RS422 UART (TX=GPIO38, RX=GPIO37, driver-enable=GPIO39) and
+/// the CSP node, and wrap them in the mission's [`PayloadLink`].
+pub fn initialize_payload_link(peripherals: Peripherals) -> Result<PayloadLink> {
+    let mut de = PinDriver::output(peripherals.pins.gpio39).map_err(|_| Error::Peripheral)?;
+    de.set_high().map_err(|_| Error::Peripheral)?;
+
+    let driver = UartDriver::new(
+        peripherals.uart1,
+        peripherals.pins.gpio38,
+        peripherals.pins.gpio37,
+        Option::<AnyIOPin>::None,
+        Option::<AnyIOPin>::None,
+        &uart::config::Config::new()
+            .baudrate(Hertz(LINK_BAUD_RATE))
+            .rx_fifo_size(8192),
+    )
+    .map_err(|_| Error::UartAllocation)?;
+    let (uart_tx, uart_rx) = driver.into_split();
+
+    let csp = CspLink::try_new(
+        CspLinkConfig {
+            address: NODE,
+            hostname: "beacon",
+            model: "esp32p4",
+        },
+        uart_tx,
+    )
+    .map_err(|_| Error::CspInit)?;
+
+    PayloadLink::try_new(csp, uart_rx, de)
 }
 
 const RGB_SDA_PIN: i32 = 11;

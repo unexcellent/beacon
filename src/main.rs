@@ -1,12 +1,12 @@
 mod board;
-mod devices;
 mod error;
+mod link;
 mod transmit_sstv;
 mod update;
 
 use board::{initialize_audio_channel, initialize_rgb_camera, initialize_thermal_camera};
-use devices::link::{Command, Message, PayloadLink};
 use error::{Error, ReportIfErr, Result};
+use link::{Command, Message, PayloadLink};
 use transmit_sstv::transmit_sstv;
 use update::update;
 
@@ -45,12 +45,7 @@ fn initialize_esp32() -> Result<Peripherals> {
 }
 
 fn initialize_payload_link(peripherals: Peripherals) -> Result<PayloadLink> {
-    let link = PayloadLink::try_new(
-        peripherals.uart1,
-        peripherals.pins.gpio38,
-        peripherals.pins.gpio37,
-        peripherals.pins.gpio39,
-    )?;
+    let link = board::initialize_payload_link(peripherals)?;
 
     let description = unsafe { &*esp_idf_svc::sys::esp_app_get_description() };
     let version =

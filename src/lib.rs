@@ -7,3 +7,5 @@
 
 pub mod audio;
 pub mod camera;
+pub mod csp;
+pub mod kiss;
