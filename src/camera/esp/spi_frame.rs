@@ -61,9 +61,7 @@ impl SpiFrameInterface {
 
             let mut dev: spi_device_interface_config_t = core::mem::zeroed();
             dev.clock_speed_hz = config.clock_hz;
-            dev.mode = 0; // SenXor slaves require SPI Mode 0.
-            // CS is driven by hand so it can stay asserted across the whole
-            // multi-chunk frame; -1 tells the driver not to toggle it per transaction.
+            dev.mode = 0;
             dev.spics_io_num = -1;
             dev.queue_size = 1;
             let mut handle: spi_device_handle_t = core::ptr::null_mut();
@@ -71,7 +69,6 @@ impl SpiFrameInterface {
                 return Err(CameraError::Transport);
             }
 
-            // Configure CS as a plain GPIO output, idle high (de-asserted).
             let cs_cfg = gpio_config_t {
                 pin_bit_mask: 1u64 << config.cs_pin,
                 mode: gpio_mode_t_GPIO_MODE_OUTPUT,

@@ -16,8 +16,8 @@ unsafe extern "C" {
 
 static FRAME_READY: AtomicBool = AtomicBool::new(false);
 
-// Holds the capture buffer pointer and length for the CSI DMA callbacks.
-// Heap-allocated so its address is stable after being registered as userdata.
+/// Holds the capture buffer pointer and length for the CSI DMA callbacks.
+/// Heap-allocated so its address is stable after being registered as userdata.
 struct CaptureBuffer {
     buf: *mut c_void,
     len: usize,
@@ -85,8 +85,8 @@ impl CsiInterface {
             let csi = Self::set_up_controller(&config, format, color_type, &buffer)?;
             Self::set_up_signal_processor(format, bayer_order)?;
 
-            // Queue the initial transaction; the callbacks re-supply the same
-            // buffer for every following frame.
+            // Only this first transaction is queued by hand; the callbacks
+            // re-supply the same buffer for every following frame.
             let mut trans: esp_cam_ctlr_trans_t = core::mem::zeroed();
             trans.buffer = buffer.buf;
             trans.buflen = buffer.len;
@@ -192,9 +192,6 @@ impl CameraInterface for CsiInterface {
             std::thread::sleep(Duration::from_millis(1));
             waited += Duration::from_millis(1);
         }
-        // The DMA engine keeps streaming into this buffer; the slice is a
-        // snapshot that the next frame may already be overwriting (accepted
-        // tearing, same as the reference implementation).
         Ok(unsafe { core::slice::from_raw_parts(self.buffer.buf as *const u8, self.buffer.len) })
     }
 }

@@ -1,5 +1,6 @@
-use crate::devices::audio::{AudioChannel, PHILLIPS_I2S};
+use crate::board::PHILLIPS_I2S;
 use crate::error::{Error, Result};
+use beacon::audio::AudioChannel;
 use beacon::camera::{Camera, Image, capture_image};
 use esp_idf_hal::delay;
 use sstv::{Encoder, Mode, Synthesizer};

@@ -1,11 +1,10 @@
-mod cameras;
+mod board;
 mod devices;
 mod error;
 mod transmit_sstv;
 mod update;
 
-use cameras::{initialize_rgb_camera, initialize_thermal_camera};
-use devices::audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
+use board::{initialize_audio_channel, initialize_rgb_camera, initialize_thermal_camera};
 use devices::link::{Command, Message, PayloadLink};
 use error::{Error, ReportIfErr, Result};
 use transmit_sstv::transmit_sstv;
@@ -61,6 +60,3 @@ fn initialize_payload_link(peripherals: Peripherals) -> Result<PayloadLink> {
     Ok(link)
 }
 
-fn initialize_audio_channel() -> Result<AudioChannel> {
-    AudioChannel::try_new(PCM5102A, PHILLIPS_I2S)
-}

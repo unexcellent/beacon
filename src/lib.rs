@@ -5,4 +5,5 @@
 //! transport implementations. Application-specific policy (output resolution,
 //! watermarking, SSTV encoding) lives in the binary.
 
+pub mod audio;
 pub mod camera;

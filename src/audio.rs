@@ -1,3 +1,5 @@
+//! I2S audio output: a mono sample stream packed into a DAC's serial format.
+
 use core::ffi::c_void;
 use std::ptr;
 
@@ -16,6 +18,15 @@ use esp_idf_sys::{
     i2s_std_slot_mask_t_I2S_STD_SLOT_RIGHT as SLOT_RIGHT,
     soc_periph_i2s_clk_src_t_I2S_CLK_SRC_DEFAULT as CLK_DEFAULT,
 };
+
+/// Error raised by the audio channel.
+#[derive(Clone, Copy, Debug)]
+pub enum AudioError {
+    /// The I2S channel could not be created or configured.
+    Init,
+    /// Writing samples to the I2S channel failed.
+    Transmission,
+}
 
 /// Describes the serial data format expected by a DAC or audio codec.
 ///
@@ -70,20 +81,6 @@ pub struct AudioInterface {
     pub chunk_size: usize,
 }
 
-/// Interface configuration for the Philips I2S standard at 16 kHz on the ESP32-P4.
-///
-/// MCLK = 256 × 16 000 Hz = 4.096 MHz. BCLK = MCLK / 8 = 512 kHz,
-/// which exactly satisfies the 16 kHz × 2 channels × 16 bits = 512 kHz requirement.
-pub const PHILLIPS_I2S: AudioInterface = AudioInterface {
-    sample_rate: 16_000,
-    clock_divider: 8,
-    mclk_pin: 20,
-    bclk_pin: 21,
-    dout_pin: 22,
-    ws_pin: 23,
-    chunk_size: 512,
-};
-
 /// An active I2S transmit channel configured for a specific encoder and interface.
 ///
 /// The channel is created in a disabled state. Call [`enable`](AudioChannel::enable)
@@ -101,7 +98,7 @@ impl AudioChannel {
     ///
     /// Allocates the ESP-IDF I2S channel and applies the standard-mode configuration
     /// derived from `encoder` and `interface`. The channel is left disabled after creation.
-    pub fn try_new(encoder: AudioEncoder, interface: AudioInterface) -> crate::Result<Self> {
+    pub fn try_new(encoder: AudioEncoder, interface: AudioInterface) -> Result<Self, AudioError> {
         let chan_cfg = i2s_chan_config_t {
             id: I2S0,
             role: MASTER,
@@ -113,7 +110,7 @@ impl AudioChannel {
         let mut tx: i2s_chan_handle_t = ptr::null_mut();
         unsafe {
             esp!(i2s_new_channel(&chan_cfg, &mut tx, ptr::null_mut()))
-                .map_err(|_| crate::Error::AudioInit)?
+                .map_err(|_| AudioError::Init)?
         };
 
         let data_bit_width = if encoder.width_16bit { BW_16 } else { BW_24 };
@@ -156,9 +153,7 @@ impl AudioChannel {
             },
         };
 
-        unsafe {
-            esp!(i2s_channel_init_std_mode(tx, &std_cfg)).map_err(|_| crate::Error::AudioInit)?
-        };
+        unsafe { esp!(i2s_channel_init_std_mode(tx, &std_cfg)).map_err(|_| AudioError::Init)? };
 
         let channel = Self {
             inner: tx,
@@ -166,18 +161,18 @@ impl AudioChannel {
             buf: vec![0u8; interface.chunk_size * 4],
             buf_pos: 0,
         };
-        channel.enable().map_err(|_| crate::Error::AudioInit)?;
+        channel.enable().map_err(|_| AudioError::Init)?;
         Ok(channel)
     }
 
     /// Packs a mono 16-bit sample into the stereo I2S frame and writes to DMA when the
     /// internal buffer is full.
-    pub fn transmit(&mut self, sample: i16) -> crate::Result<()> {
+    pub fn transmit(&mut self, sample: i16) -> Result<(), AudioError> {
         let [lo, hi] = sample.to_le_bytes();
         let (audio_off, silent_off) = if self.left_channel { (0, 2) } else { (2, 0) };
-        self.buf[self.buf_pos + audio_off]     = lo;
+        self.buf[self.buf_pos + audio_off] = lo;
         self.buf[self.buf_pos + audio_off + 1] = hi;
-        self.buf[self.buf_pos + silent_off]     = 0;
+        self.buf[self.buf_pos + silent_off] = 0;
         self.buf[self.buf_pos + silent_off + 1] = 0;
         self.buf_pos += 4;
 
@@ -187,7 +182,7 @@ impl AudioChannel {
         Ok(())
     }
 
-    pub fn flush(&mut self) -> crate::Result<()> {
+    pub fn flush(&mut self) -> Result<(), AudioError> {
         let mut remaining = &self.buf[..self.buf_pos];
         while !remaining.is_empty() {
             let mut written = 0usize;
@@ -199,7 +194,7 @@ impl AudioChannel {
                     &mut written,
                     u32::MAX,
                 ))
-                .map_err(|_| crate::Error::AudioTransmission)?;
+                .map_err(|_| AudioError::Transmission)?;
             }
             remaining = &remaining[written..];
         }
@@ -214,9 +209,8 @@ impl AudioChannel {
         }
     }
 
-    fn enable(&self) -> crate::Result<()> {
-        unsafe { esp!(i2s_channel_enable(self.inner)) }
-            .map_err(|_| crate::Error::AudioTransmission)
+    fn enable(&self) -> Result<(), AudioError> {
+        unsafe { esp!(i2s_channel_enable(self.inner)) }.map_err(|_| AudioError::Transmission)
     }
 }
 

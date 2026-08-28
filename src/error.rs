@@ -54,6 +54,15 @@ pub enum Error {
     UpdateWrite(u32, i32),
 }
 
+impl From<beacon::audio::AudioError> for Error {
+    fn from(e: beacon::audio::AudioError) -> Self {
+        match e {
+            beacon::audio::AudioError::Init => Error::AudioInit,
+            beacon::audio::AudioError::Transmission => Error::AudioTransmission,
+        }
+    }
+}
+
 /// Forwards to the derived [`Debug`](fmt::Debug), so that logs, `expect`
 /// panics and the ground report all show the same variant-name format.
 impl fmt::Display for Error {

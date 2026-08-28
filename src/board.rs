@@ -1,9 +1,10 @@
-//! Board bring-up for the two MOVE-IIIa cameras: pin maps, bus construction,
-//! reset sequencing and diagnostics. Everything chip- or transport-generic
-//! lives in [`beacon::camera`](beacon::camera); this module is the wiring.
+//! Board bring-up for the MOVE-IIIa carrier: pin maps, bus construction,
+//! reset sequencing and diagnostics for every peripheral. Everything chip- or
+//! transport-generic lives in the `beacon` library; this module is the wiring.
 
 use std::time::Duration;
 
+use beacon::audio::{AudioChannel, AudioInterface, PCM5102A};
 use beacon::camera::esp::{
     CsiConfig, CsiInterface, EspI2c, I2cConfig, ResetPin, SpiFrameConfig, SpiFrameInterface,
 };
@@ -14,19 +15,32 @@ use esp_idf_sys::*;
 
 use crate::error::{Error, Result};
 
-/// Robot36 output grid, shared by both cameras and the watermark overlay.
 pub const OUTPUT_WIDTH: usize = sstv::Mode::Robot36.image_width() as usize;
 pub const OUTPUT_HEIGHT: usize = sstv::Mode::Robot36.image_height() as usize;
 
 pub type RgbCam = RgbCamera<Sc850sl<EspI2c>, CsiInterface>;
 pub type ThermalCam = ThermalCamera<Mi48<EspI2c>, SpiFrameInterface>;
 
-// ── RGB camera: SC850SL on MIPI CSI-2 ───────────────────────────────────────────
+/// Interface configuration for the Philips I2S standard at 16 kHz on the ESP32-P4.
+///
+/// MCLK = 256 × 16 000 Hz = 4.096 MHz. BCLK = MCLK / 8 = 512 kHz,
+/// which exactly satisfies the 16 kHz × 2 channels × 16 bits = 512 kHz requirement.
+pub const PHILLIPS_I2S: AudioInterface = AudioInterface {
+    sample_rate: 16_000,
+    clock_divider: 8,
+    mclk_pin: 20,
+    bclk_pin: 21,
+    dout_pin: 22,
+    ws_pin: 23,
+    chunk_size: 512,
+};
 
-/// GPIO pin for the sensor control bus (LP I2C).
+pub fn initialize_audio_channel() -> Result<AudioChannel> {
+    Ok(AudioChannel::try_new(PCM5102A, PHILLIPS_I2S)?)
+}
+
 const RGB_SDA_PIN: i32 = 11;
 const RGB_SCL_PIN: i32 = 9;
-/// GPIO pin for sensor reset (active-low XSHUTDN).
 const RGB_XSHUTDN_PIN: i32 = 54;
 
 const RGB_CSI: CsiConfig = CsiConfig {
@@ -64,22 +78,15 @@ pub fn initialize_rgb_camera() -> Result<RgbCam> {
     }
 
     let interface = CsiInterface::new(RGB_CSI, &sensor.format()).map_err(|_| Error::RgbInit)?;
-    RgbCamera::try_new(sensor, interface, (OUTPUT_WIDTH, OUTPUT_HEIGHT))
-        .map_err(|_| Error::RgbInit)
+    RgbCamera::try_new(sensor, interface, (OUTPUT_WIDTH, OUTPUT_HEIGHT)).map_err(|_| Error::RgbInit)
 }
 
-// ── Thermal camera: MI1602 via MI48Dx (I2C control + SPI readout) ────────────────
-
-// SPI2 data bus (MI48Dx is the SPI slave; ESP32 is master, Mode 0, MSB-first).
-const THERMAL_CS_PIN: i32 = 31; // G31_RMII_MDC  → SPI2 CS  (MI48 SSN, active low)
-const THERMAL_CLK_PIN: i32 = 28; // G28_RMII_RXDV → SPI2 CLK
-const THERMAL_MOSI_PIN: i32 = 30; // G30_RMII_RXD1 → SPI2 MOSI (host clocks dummy 0x0000)
-const THERMAL_MISO_PIN: i32 = 29; // G29_RMII_RXD0 → SPI2 MISO (thermal data)
-// I²C control bus (MI48Dx register access), driven by the HP I²C peripheral via the
-// GPIO matrix. On the ESP32-P4 GPIO0-15 are the LP-capable pads, so these equal the
-// schematic's LP_GPIO12/15.
-const THERMAL_SDA_PIN: i32 = 12; // GPIO12 (LP_GPIO12)
-const THERMAL_SCL_PIN: i32 = 15; // GPIO15 (LP_GPIO15)
+const THERMAL_CS_PIN: i32 = 31;
+const THERMAL_CLK_PIN: i32 = 28;
+const THERMAL_MOSI_PIN: i32 = 30;
+const THERMAL_MISO_PIN: i32 = 29;
+const THERMAL_SDA_PIN: i32 = 12;
+const THERMAL_SCL_PIN: i32 = 15;
 
 const THERMAL_SPI: SpiFrameConfig = SpiFrameConfig {
     host: spi_host_device_t_SPI2_HOST,
@@ -87,7 +94,6 @@ const THERMAL_SPI: SpiFrameConfig = SpiFrameConfig {
     clk_pin: THERMAL_CLK_PIN,
     mosi_pin: THERMAL_MOSI_PIN,
     miso_pin: THERMAL_MISO_PIN,
-    // 7.8 MHz: the reference driver's proven value (higher rates corrupted the frame CRC).
     clock_hz: 7_800_000,
     chunk_bytes: 16_384,
     cs_settle_us: 100,
@@ -99,35 +105,19 @@ const THERMAL_BOOT_SETTLE_MS: u64 = 2_000;
 
 pub fn initialize_thermal_camera() -> Result<ThermalCam> {
     log::info!("Thermal camera: initializing (MI1602 via MI48Dx)...");
-    // The MI48Dx RSTN (active-low reset) is not host-driven on this carrier; it must
-    // NOT float. Either pull it up to 3V3 on the board, or wire it to a spare GPIO
-    // and add a ResetPin pulse here (assert ≥50 µs, then ~50 ms to settle).
-    log::warn!(
-        "MI48: RSTN not host-driven. If the reset line floats the chip will not boot \
-         reliably — pull RSTN up to 3V3, or wire it to a GPIO and reset it here."
-    );
 
     let i2c = EspI2c::new(I2cConfig {
         port: i2c_port_t_I2C_NUM_0 as i32,
         sda_pin: THERMAL_SDA_PIN,
         scl_pin: THERMAL_SCL_PIN,
-        // Weak internal pull-ups as a safety net; the board should still have proper
-        // external 4.7 kΩ pull-ups on SDA/SCL for reliable comms.
         internal_pullups: true,
-        // Free the bus in case the MI48Dx (or a prior half-finished transfer) left SDA
-        // held low after the P4 reset — without this the master can find the whole bus
-        // wedged and no device ACKs.
         reset_on_init: true,
-        // 100 kHz, matching the reference driver. Clock-stretch tolerance (`scl_wait_us`),
-        // not a slow clock, is what makes the link reliable here: the MI48Dx holds SCL
-        // low for tens of ms while busy. 50 ms is the reference driver's value.
         scl_speed_hz: 100_000,
         scl_wait_us: 50_000,
         timeout_ms: 100,
     })
     .map_err(|_| Error::ThermalInit)?;
 
-    // Let the rails and the MI48Dx settle after the bus reset before the first probe.
     std::thread::sleep(Duration::from_millis(THERMAL_BOOT_SETTLE_MS));
     scan_thermal_bus(&i2c);
 
@@ -137,7 +127,6 @@ pub fn initialize_thermal_camera() -> Result<ThermalCam> {
 
     let interface =
         SpiFrameInterface::new(THERMAL_SPI, frame_bytes).map_err(|_| Error::ThermalInit)?;
-    // Mirror left↔right so the scene matches the RGB camera's orientation.
     ThermalCamera::try_new(sensor, interface, (OUTPUT_WIDTH, OUTPUT_HEIGHT), true)
         .map_err(|_| Error::ThermalInit)
 }

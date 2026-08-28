@@ -63,9 +63,6 @@ impl<S: FrameTrigger, I: CameraInterface> ThermalCamera<S, I> {
     /// Trigger and read exactly one single-shot frame. Returns None (and leaves
     /// the chip idle) on timeout or a failed readout.
     fn capture_one(&mut self) -> Option<&[u8]> {
-        // Surface a failed trigger write: if it does not land, the sensor is never
-        // told to capture, so frame-ready can never assert. Logging it distinguishes
-        // "trigger didn't reach the chip" from "chip triggered but produced no frame".
         if let Err(e) = self.sensor.trigger() {
             log::warn!("thermal: frame trigger write failed: {e:?}");
         }
@@ -127,7 +124,6 @@ impl<S: FrameTrigger, I: CameraInterface> Camera for ThermalCamera<S, I> {
                 && frame.len() >= words_per_frame * 2
             {
                 for (i, slot) in acc.iter_mut().enumerate() {
-                    // Words are 16-bit, MSB byte first on the wire.
                     *slot += u16::from_be_bytes([frame[2 * i], frame[2 * i + 1]]) as u32;
                 }
                 n += 1;
@@ -136,7 +132,12 @@ impl<S: FrameTrigger, I: CameraInterface> Camera for ThermalCamera<S, I> {
 
         if n == 0 {
             log::error!("thermal: no frame captured — producing a blank image");
-            return build_image(&vec![0u16; words_per_frame], self.size, self.output, self.mirror);
+            return build_image(
+                &vec![0u16; words_per_frame],
+                self.size,
+                self.output,
+                self.mirror,
+            );
         }
         let averaged: Vec<u16> = acc.iter().map(|&s| (s / n) as u16).collect();
         build_image(&averaged, self.size, self.output, self.mirror)
@@ -145,12 +146,7 @@ impl<S: FrameTrigger, I: CameraInterface> Camera for ThermalCamera<S, I> {
 
 /// Turn an averaged temperature frame into a greyscale, nearest-neighbour
 /// scaled [`Image`], optionally flipped horizontally.
-fn build_image(
-    words: &[u16],
-    size: (usize, usize),
-    output: (usize, usize),
-    mirror: bool,
-) -> Image {
+fn build_image(words: &[u16], size: (usize, usize), output: (usize, usize), mirror: bool) -> Image {
     let (src_w, src_h) = size;
     let (out_w, out_h) = output;
 
