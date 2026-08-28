@@ -1,55 +1,96 @@
-use esp_idf_sys::*;
+//! The SmartSens SC850SL 8MP Bayer sensor, in its 4K / 15 fps / 2-lane / RAW10 mode.
+
 use std::time::Duration;
 
-pub struct CameraSensor {
-    /// 7-bit I2C address of the sensor on the control bus.
-    pub i2c_address: u8,
-    /// Width, height of the captured image in pixels.
-    pub resolution: (usize, usize),
-    /// The sensor's black-level pedestal in 8-bit space.
-    pub black_level: u8,
-    /// Initial white-balance red gain seed (green = 1.0 reference).
-    pub red_gain_seed: f32,
-    /// Initial white-balance blue gain seed (green = 1.0 reference).
-    pub blue_gain_seed: f32,
-    /// Frame length in lines (VTS, regs 0x320e/0x320f). Bounds the exposure time.
-    pub vts: u16,
-    /// Exposure integration time in lines from the init table (starting point for AE).
-    pub default_exposure: u16,
-    /// Register init table: (address, value) pairs written over I2C at startup.
-    pub init_table: &'static [(u16, u8)],
-    /// Register addresses that require a 20 ms delay after writing (e.g., PLL latching regs).
-    pub delayed_registers: &'static [u16],
+use embedded_hal::i2c::I2c;
+
+use crate::camera::sensor::{BayerSensor, CameraSensor, ColorCalibration, ExposureControl};
+use crate::camera::{BayerOrder, FrameFormat, PixelFormat};
+
+/// Frame length in lines (VTS, regs 0x320e/0x320f in the init table). Bounds the exposure time.
+const VTS: u16 = 0x08ca;
+
+pub struct Sc850sl<I2C> {
+    i2c: I2C,
+    address: u8,
 }
 
-impl CameraSensor {
-    pub(super) unsafe fn init(&self, i2c_dev: i2c_master_dev_handle_t) -> bool {
-        for &(reg, val) in self.init_table {
-            if !self.write(i2c_dev, reg, val) {
-                return false;
+impl<I2C> Sc850sl<I2C> {
+    /// Strap-default 7-bit I2C address.
+    pub const DEFAULT_I2C_ADDRESS: u8 = 0x30;
+
+    /// `address` is the board-strapped 7-bit I2C address
+    /// ([`DEFAULT_I2C_ADDRESS`](Self::DEFAULT_I2C_ADDRESS) unless re-strapped).
+    pub fn new(i2c: I2C, address: u8) -> Self {
+        Self { i2c, address }
+    }
+}
+
+impl<I2C: I2c> Sc850sl<I2C> {
+    /// Write an 8-bit value to a 16-bit register address, retrying on bus errors.
+    fn write(&mut self, reg: u16, val: u8) -> Result<(), I2C::Error> {
+        let buf = [(reg >> 8) as u8, reg as u8, val];
+        let mut result = self.i2c.write(self.address, &buf);
+        for _ in 0..2 {
+            if result.is_ok() {
+                break;
             }
-            if self.delayed_registers.contains(&reg) {
+            std::thread::sleep(Duration::from_millis(5));
+            result = self.i2c.write(self.address, &buf);
+        }
+        result
+    }
+}
+
+impl<I2C: I2c> CameraSensor for Sc850sl<I2C> {
+    type Error = I2C::Error;
+
+    fn format(&self) -> FrameFormat {
+        FrameFormat {
+            width: 3840,
+            height: 2160,
+            pixel: PixelFormat::Raw10(BayerOrder::Rggb),
+        }
+    }
+
+    fn init(&mut self) -> Result<(), Self::Error> {
+        // PLL latching regs require a settle delay after writing.
+        const DELAYED_REGISTERS: [u16; 2] = [0x36e9, 0x36f9];
+
+        for &(reg, val) in INIT_TABLE {
+            self.write(reg, val)?;
+            if DELAYED_REGISTERS.contains(&reg) {
                 std::thread::sleep(Duration::from_millis(20));
             }
         }
-        true
+        Ok(())
     }
 
-    pub(super) unsafe fn enable(&self, i2c_dev: i2c_master_dev_handle_t) -> bool {
-        if !self.write(i2c_dev, 0x302c, 0x00) { return false; }
-        if !self.write(i2c_dev, 0x0100, 0x01) { return false; }
+    fn start(&mut self) -> Result<(), Self::Error> {
+        self.write(0x302c, 0x00)?;
+        self.write(0x0100, 0x01)?;
         std::thread::sleep(Duration::from_millis(200));
-        true
+        Ok(())
     }
 
-    pub(super) unsafe fn disable(&self, i2c_dev: i2c_master_dev_handle_t) -> bool {
-        self.write(i2c_dev, 0x0100, 0x00)
+    fn stop(&mut self) -> Result<(), Self::Error> {
+        self.write(0x0100, 0x00)
+    }
+}
+
+impl<I2C: I2c> ExposureControl for Sc850sl<I2C> {
+    /// Upper bound is VTS minus a small guard band (datasheet limit is VTS-4;
+    /// we keep a couple of extra lines of margin).
+    fn exposure_range(&self) -> (u32, u32) {
+        (1, (VTS as u32).saturating_sub(8).max(1))
     }
 
-    /// Largest exposure (in lines) the sensor will accept: VTS minus a small guard band
-    /// (datasheet limit is VTS-4; we keep a couple of extra lines of margin).
-    pub(super) fn max_exposure(&self) -> u32 {
-        (self.vts as u32).saturating_sub(8).max(1)
+    fn default_exposure(&self) -> u32 {
+        2080 // reg 0x3e01=0x82 in the init table -> 0x820 = 2080 lines
+    }
+
+    fn max_gain(&self) -> f32 {
+        48.0 // the analog-gain table tops out ~49.6x
     }
 
     /// Set the linear-mode integration time in lines.
@@ -58,58 +99,53 @@ impl CameraSensor {
     /// of 1/16 line: {0x3e00[3:0], 0x3e01[7:0], 0x3e02[7:4]} == lines << 4. Equivalently we
     /// write the 16-bit line count as 0x3e00=[15:12], 0x3e01=[11:4], 0x3e02=[3:0]<<4.
     /// (Packing per SmartSens datasheet V1.10 / MOVE-IIIa cmos_inttime_update.)
-    pub(super) unsafe fn set_exposure(&self, i2c_dev: i2c_master_dev_handle_t, lines: u32) -> bool {
-        let l = lines.clamp(1, self.max_exposure());
-        self.write(i2c_dev, 0x3e00, ((l & 0xf000) >> 12) as u8)
-            && self.write(i2c_dev, 0x3e01, ((l & 0x0ff0) >> 4) as u8)
-            && self.write(i2c_dev, 0x3e02, ((l & 0x000f) << 4) as u8)
+    fn set_exposure(&mut self, lines: u32) -> Result<(), Self::Error> {
+        let (min, max) = self.exposure_range();
+        let l = lines.clamp(min, max);
+        self.write(0x3e00, ((l & 0xf000) >> 12) as u8)?;
+        self.write(0x3e01, ((l & 0x0ff0) >> 4) as u8)?;
+        self.write(0x3e02, ((l & 0x000f) << 4) as u8)
     }
 
-    /// Set the analog gain as a linear multiplier (1.0 = unity).
-    ///
     /// Coarse gain (0x3e08) doubles per bucket — 0x03/0x07/0x23/0x27/0x2f/0x3f = 1/2/4/8/16/32x;
     /// fine gain (0x3e09) runs 0x40 (= bucket base) up to 0x7f (≈2x the base). Values and
     /// bucket layout are from the datasheet-derived AgainInfo table.
-    pub(super) unsafe fn set_analog_gain(&self, i2c_dev: i2c_master_dev_handle_t, gain: f32) -> bool {
+    fn set_analog_gain(&mut self, gain: f32) -> Result<(), Self::Error> {
         const BUCKETS: [(f32, u8); 6] = [
-            (1.0, 0x03), (2.0, 0x07), (4.0, 0x23), (8.0, 0x27), (16.0, 0x2f), (32.0, 0x3f),
+            (1.0, 0x03),
+            (2.0, 0x07),
+            (4.0, 0x23),
+            (8.0, 0x27),
+            (16.0, 0x2f),
+            (32.0, 0x3f),
         ];
-        let g = gain.clamp(1.0, 48.0);
-        let (base, coarse) = BUCKETS.iter().rev().find(|&&(b, _)| g >= b).copied().unwrap_or(BUCKETS[0]);
+        let g = gain.clamp(1.0, self.max_gain());
+        let (base, coarse) = BUCKETS
+            .iter()
+            .rev()
+            .find(|&&(b, _)| g >= b)
+            .copied()
+            .unwrap_or(BUCKETS[0]);
         let fine = ((0x40 as f32 * g / base).round() as i32).clamp(0x40, 0x7f) as u8;
-        self.write(i2c_dev, 0x3e08, coarse) && self.write(i2c_dev, 0x3e09, fine)
-    }
-
-    unsafe fn write(&self, dev: i2c_master_dev_handle_t, reg: u16, val: u8) -> bool {
-        let buf = [(reg >> 8) as u8, reg as u8, val];
-        for attempt in 0..3u8 {
-            if i2c_master_transmit(dev, buf.as_ptr(), 3, 50) == ESP_OK {
-                return true;
-            }
-            if attempt < 2 {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }
-        false
+        self.write(0x3e08, coarse)?;
+        self.write(0x3e09, fine)
     }
 }
 
-pub const SC850SL: CameraSensor = CameraSensor {
-    i2c_address: 0x30,
-    resolution: (3840, 2160),
-    black_level: 16,
-    red_gain_seed: 1.5,
-    blue_gain_seed: 1.5,
-    vts: 0x08ca,            // regs 0x320e/0x320f in the init table (2250 lines)
-    default_exposure: 2080, // reg 0x3e01=0x82 -> 0x820 = 2080 lines
-    init_table: SC850SL_INIT_TABLE,
-    delayed_registers: &[0x36e9, 0x36f9],
-};
+impl<I2C: I2c> BayerSensor for Sc850sl<I2C> {
+    fn color_calibration(&self) -> ColorCalibration {
+        ColorCalibration {
+            black_level: 16,
+            red_gain: 1.5,
+            blue_gain: 1.5,
+        }
+    }
+}
 
 // Init table for SC850SL mode: 4K / 15 fps / 2-lane / RAW10 (table_2, 191 entries)
 // Source: MOVE-IIIa-Imager/firmware/components/sc850sl/init_tables/sc850sl_table_2.c
 #[rustfmt::skip]
-const SC850SL_INIT_TABLE: &[(u16, u8)] = &[
+const INIT_TABLE: &[(u16, u8)] = &[
     (0x0103, 0x01), (0x0100, 0x00), (0x36e9, 0x80), (0x36f9, 0x80),
     (0x36ea, 0x17), (0x36eb, 0x0c), (0x36ec, 0x4a), (0x36ed, 0x24),
     (0x36fa, 0xcb), (0x36fb, 0x13), (0x36fc, 0x00), (0x36fd, 0x07),

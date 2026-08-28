@@ -1,10 +1,12 @@
+mod cameras;
 mod devices;
 mod error;
 mod transmit_sstv;
 mod update;
+mod watermark;
 
+use cameras::{initialize_rgb_camera, initialize_thermal_camera};
 use devices::audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};
-use devices::camera::{MIPI, RgbCamera, SC850SL, ThermalCamera};
 use devices::link::{Command, Message, PayloadLink};
 use error::{Error, ReportIfErr, Result};
 use transmit_sstv::transmit_sstv;
@@ -58,14 +60,6 @@ fn initialize_payload_link(peripherals: Peripherals) -> Result<PayloadLink> {
     link.send(Message::Booted(format!("{version}")));
 
     Ok(link)
-}
-
-fn initialize_rgb_camera() -> Result<RgbCamera> {
-    RgbCamera::try_new(SC850SL, MIPI)
-}
-
-fn initialize_thermal_camera() -> Result<ThermalCamera> {
-    ThermalCamera::try_new()
 }
 
 fn initialize_audio_channel() -> Result<AudioChannel> {

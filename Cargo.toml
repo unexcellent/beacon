@@ -28,6 +28,7 @@ esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal.git" }
 esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git" }
 
 [dependencies]
+embedded-hal = "1"
 log = "0.4"
 esp-idf-sys = "0.37"
 esp-idf-hal = "0.46"
@@ -41,6 +42,6 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 
 [package.metadata.esp-idf-sys]
 extra_components = [
-    { bindings_header = "src/devices/camera/bindings.h" },
+    { bindings_header = "src/camera/bindings.h" },
     { component_dirs = ["cmake_override/isp_patch"] }
 ]
