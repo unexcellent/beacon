@@ -13,14 +13,14 @@ use crate::devices::link::{Message, PayloadLink};
 // ground report.
 #[allow(dead_code)]
 pub enum Error {
-    /// Raised if all cameras failed to initialize.
-    AllCamerasInit,
     /// Raised if the audio channel failed to initialize.
     AudioInit,
     /// Raised when writing samples to the I2S channel fails.
     AudioTransmission,
     /// Raised when an error with creating the libcsp node occurred.
     CspInit,
+    /// Raised when a camera returned an empty image.
+    EmptyImage,
     /// Raised when an error with the ESP32 hardware occurred.
     Peripheral,
     /// Raised if the RGB camera failed to initialize.

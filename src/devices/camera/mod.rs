@@ -26,13 +26,17 @@ pub(crate) const OUTPUT_HEIGHT: usize = sstv::Mode::Robot36.image_height() as us
 pub trait Camera {
     /// Bring the sensor out of standby and prepare it to capture.
     fn power_on(&mut self);
+
     /// Return the sensor to a low-power idle state.
     fn power_off(&mut self);
+
     /// Capture and discard warm-up frames so the sensor / on-chip filters settle.
     /// Each implementation knows how many frames it needs.
     fn calibrate(&mut self);
+
     /// Receive a single frame as a ready-to-encode image.
     fn receive_frame(&mut self) -> Image;
+
     /// Capture a frame from turned off state and turn the camera back off.
     fn capture(&mut self) -> Image {
         self.power_on();

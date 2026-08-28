@@ -9,10 +9,6 @@ pub fn transmit_sstv(
     thermal: Option<&mut ThermalCamera>,
     audio: &mut AudioChannel,
 ) -> Result<()> {
-    if rgb.is_none() && thermal.is_none() {
-        return Err(Error::AllCamerasInit);
-    }
-
     let rgb_image = capture_image(rgb);
     let thermal_image = capture_image(thermal);
 
@@ -29,14 +25,14 @@ pub fn transmit_sstv(
 }
 
 fn sleep(seconds: u32) {
-    log::info!("Sleeping {}s...", seconds);
+    log::info!("Waiting {} seconds...", seconds);
     delay::FreeRtos::delay_ms(seconds * 1_000);
 }
 
 fn transmit_image(image: Image, audio: &mut AudioChannel) -> Result<()> {
     log::info!("SSTV: encoding and transmitting...");
 
-    let encoder = Encoder::new(Mode::Robot36, image).unwrap();
+    let encoder = Encoder::new(Mode::Robot36, image).map_err(|_| Error::EmptyImage)?;
     for sample in Synthesizer::new(encoder, PHILLIPS_I2S.sample_rate) {
         audio.transmit(sample)?;
     }
