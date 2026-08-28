@@ -3,7 +3,6 @@ mod devices;
 mod error;
 mod transmit_sstv;
 mod update;
-mod watermark;
 
 use cameras::{initialize_rgb_camera, initialize_thermal_camera};
 use devices::audio::{AudioChannel, PCM5102A, PHILLIPS_I2S};

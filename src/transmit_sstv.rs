@@ -1,6 +1,5 @@
 use crate::devices::audio::{AudioChannel, PHILLIPS_I2S};
 use crate::error::{Error, Result};
-use crate::watermark;
 use beacon::camera::{Camera, Image, capture_image};
 use esp_idf_hal::delay;
 use sstv::{Encoder, Mode, Synthesizer};
@@ -10,12 +9,8 @@ pub fn transmit_sstv(
     thermal: Option<&mut impl Camera>,
     audio: &mut AudioChannel,
 ) -> Result<()> {
-    let watermarked = |mut image: Image| {
-        watermark::apply(&mut image);
-        image
-    };
-    let rgb_image = capture_image(rgb).map(watermarked);
-    let thermal_image = capture_image(thermal).map(watermarked);
+    let rgb_image = capture_image(rgb);
+    let thermal_image = capture_image(thermal);
 
     if let Some(rgb_image) = rgb_image {
         transmit_image(rgb_image, audio)?;
