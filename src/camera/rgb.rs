@@ -1,25 +1,25 @@
-//! An RGB camera: any Bayer [`CameraSensor`](crate::camera::sensor::CameraSensor)
-//! paired with any [`CameraInterface`], demosaiced and colour-corrected into an
-//! [`Image`] at a caller-chosen output resolution, with closed-loop auto-exposure.
+//! The RGB camera: an SC850SL Bayer sensor over the ESP32-P4 CSI transport,
+//! demosaiced and colour-corrected into an [`Image`] at a caller-chosen output
+//! resolution, with closed-loop auto-exposure. The exposure control law lives
+//! in [`auto_exposure`](super::auto_exposure); this module wires it to the
+//! frame stream.
 
 use std::time::Duration;
 
 use esp_idf_sys::vTaskDelay;
 use sstv::RgbPixel;
 
+use super::auto_exposure::{
+    AutoExposureLimits, AutoExposureState, AutoExposureStep, MeterResult, auto_exposure_step,
+};
+use super::esp::{CsiInterface, EspI2c};
 use super::format::BayerChannel;
-use super::interface::CameraInterface;
-use super::sensor::{BayerSensor, ExposureControl};
+use super::sensors::Sc850sl;
 use super::{BayerOrder, Camera, CameraError, FrameFormat, Image, PixelFormat};
 
-// Auto-exposure tuning. Metering works in the 8-bit MSB space (0..255) on the high percentile
-// of the frame (see `meter`) rather than the mean, so bimodal orbit scenes meter sanely.
-const AE_TARGET_LUMA: f32 = 230.0; // drive the high percentile to just below saturation
-const AE_LUMA_LOW: f32 = 205.0; // converged band (lower bound)
-const AE_LUMA_HIGH: f32 = 248.0; // converged band (upper bound)
-const AE_CLIP_LIMIT: f32 = 0.02; // tolerate up to 2% near-saturated pixels
-const AE_HL_SCALE: f32 = 0.7; // forced exposure cut per step while highlights clip
-const AE_MAX_ITERS: u32 = 6; // frame budget for convergence
+/// Frame budget for auto-exposure convergence: at most this many metered frames
+/// before the capture proceeds with whatever operating point was reached.
+const AUTO_EXPOSURE_MAX_ITERS: u32 = 6;
 
 /// Frames to capture and discard on activation: the sensor stream just needs to
 /// stabilise after power-on before the kept capture.
@@ -29,28 +29,32 @@ const WARMUP_FRAMES: u32 = 2;
 /// only by the transport staying alive (matches the reference behaviour).
 const FRAME_WAIT: Duration = Duration::MAX;
 
-pub struct RgbCamera<S, I> {
-    sensor: S,
-    interface: I,
+pub struct RgbCamera {
+    sensor: Sc850sl<EspI2c>,
+    interface: CsiInterface,
     format: FrameFormat,
     order: BayerOrder,
     output: (usize, usize),
     black_level: u8,
     wb_r: f32,
     wb_b: f32,
-    /// Current sensor integration time in lines (AE state, persists across activations).
+    /// Current sensor integration time in lines (auto-exposure state, persists across activations).
     exposure: u32,
     /// Current analog gain as a linear multiplier (1.0 = unity).
     gain: f32,
 }
 
-impl<S: BayerSensor + ExposureControl, I: CameraInterface> RgbCamera<S, I> {
+impl RgbCamera {
     /// Compose an initialized sensor with its frame transport.
     ///
-    /// The sensor must already have had [`init`](super::sensor::CameraSensor::init)
+    /// The sensor must already have had [`init`](Sc850sl::init)
     /// run (board bring-up owns the reset/retry sequencing around it); this
     /// starts streaming, verifies frames arrive, and parks the sensor in standby.
-    pub fn try_new(mut sensor: S, interface: I, output: (usize, usize)) -> Result<Self, CameraError> {
+    pub fn try_new(
+        mut sensor: Sc850sl<EspI2c>,
+        interface: CsiInterface,
+        output: (usize, usize),
+    ) -> Result<Self, CameraError> {
         let format = sensor.format();
         let PixelFormat::Raw10(order) = format.pixel else {
             // The demosaic pipeline only reads packed RAW10 mosaics.
@@ -86,71 +90,22 @@ impl<S: BayerSensor + ExposureControl, I: CameraInterface> RgbCamera<S, I> {
         Ok(cam)
     }
 
-    /// Closed-loop auto-exposure: meter the raw frame and drive the sensor's integration
-    /// time (and analog gain, only once exposure saturates) so bright scenes stop clipping.
-    ///
-    /// Exposure is the primary lever and is preferred all the way to its ceiling before any
-    /// gain is added, since gain only amplifies noise. Highlight-priority metering forces a
-    /// cut whenever a bright source clips, independent of the average brightness.
-    fn auto_expose(&mut self) {
-        let format = self.format;
-        let order = self.order;
-        for i in 0..AE_MAX_ITERS {
-            let Ok(frame) = self.interface.wait_frame(FRAME_WAIT) else {
-                continue;
-            };
-            let (p_high, clip) = meter(frame, &format, order);
-
-            let converged =
-                clip <= AE_CLIP_LIMIT && p_high >= AE_LUMA_LOW && p_high <= AE_LUMA_HIGH;
-            log::info!(
-                "AE iter {i}: p95={p_high:.0} clip={:.1}% exp={} gain={:.2}x -> {}",
-                clip * 100.0,
-                self.exposure,
-                self.gain,
-                if converged { "converged" } else { "adjust" }
-            );
-            if converged {
-                return;
-            }
-
-            // Desired multiplicative change in total light. Clipping forces a reduction even
-            // if the percentile looks fine (a small, very bright spot in an otherwise dim scene).
-            let luma_scale = AE_TARGET_LUMA / p_high.max(1.0);
-            let scale = if clip > AE_CLIP_LIMIT {
-                luma_scale.min(AE_HL_SCALE)
-            } else {
-                luma_scale
-            };
-
-            // Distribute the change over exposure (preferred) then gain.
-            let max_exp = self.sensor.exposure_range().1 as f32;
-            let max_gain = self.sensor.max_gain();
-            let light = self.exposure as f32 * self.gain;
-            let desired = (light * scale).clamp(1.0, max_exp * max_gain);
-            let (exp, gain) = if desired <= max_exp {
-                (desired.max(1.0), 1.0)
-            } else {
-                (max_exp, (desired / max_exp).min(max_gain))
-            };
-            self.exposure = exp.round() as u32;
-            self.gain = gain;
-
-            let _ = self.sensor.set_exposure(self.exposure);
-            let _ = self.sensor.set_analog_gain(self.gain);
-
-            // Let the new exposure/gain take effect (applied on the next frame) before re-metering.
-            let _ = self.interface.wait_frame(FRAME_WAIT);
-            let _ = self.interface.wait_frame(FRAME_WAIT);
-        }
+    /// Push a new operating point to the sensor, then wait for it to take effect
+    /// (exposure and gain apply a frame or two later) before the next metering.
+    fn apply_exposure(&mut self, point: AutoExposureState) {
+        self.exposure = point.exposure;
+        self.gain = point.gain;
+        let _ = self.sensor.set_exposure(point.exposure);
+        let _ = self.sensor.set_analog_gain(point.gain);
+        let _ = self.interface.wait_frame(FRAME_WAIT);
+        let _ = self.interface.wait_frame(FRAME_WAIT);
     }
 }
 
-impl<S: BayerSensor + ExposureControl, I: CameraInterface> Camera for RgbCamera<S, I> {
-    /// Enable sensor streaming and converge auto-exposure before the next capture.
+impl Camera for RgbCamera {
+    /// Enable sensor streaming.
     fn power_on(&mut self) {
         let _ = self.sensor.start();
-        self.auto_expose();
     }
 
     /// Put the sensor into standby (stops streaming, saves power).
@@ -158,7 +113,42 @@ impl<S: BayerSensor + ExposureControl, I: CameraInterface> Camera for RgbCamera<
         let _ = self.sensor.stop();
     }
 
+    /// Settle before the kept capture: converge auto-exposure, then discard a
+    /// few warm-up frames so the on-chip filters stabilise.
     fn calibrate(&mut self) {
+        let format = self.format;
+        let order = self.order;
+        let limits = AutoExposureLimits {
+            max_exposure: self.sensor.exposure_range().1,
+            max_gain: self.sensor.max_gain(),
+        };
+
+        // Closed-loop auto-exposure: meter each frame and drive the sensor
+        // toward the converged band, up to a fixed frame budget. Exposure is the
+        // primary lever, gain only once it saturates (gain amplifies noise).
+        for iteration in 0..AUTO_EXPOSURE_MAX_ITERS {
+            let Ok(frame) = self.interface.wait_frame(FRAME_WAIT) else {
+                continue;
+            };
+            let metered = meter(frame, &format, order);
+            log::info!(
+                "auto-exposure iter {iteration}: p95={:.0} clip={:.1}% exp={} gain={:.2}x",
+                metered.p_high,
+                metered.clip * 100.0,
+                self.exposure,
+                self.gain,
+            );
+
+            let state = AutoExposureState {
+                exposure: self.exposure,
+                gain: self.gain,
+            };
+            match auto_exposure_step(state, limits, &metered) {
+                AutoExposureStep::Converged => break,
+                AutoExposureStep::Adjust(next) => self.apply_exposure(next),
+            }
+        }
+
         for _ in 0..WARMUP_FRAMES {
             let _ = self.interface.wait_frame(FRAME_WAIT);
         }
@@ -236,13 +226,16 @@ fn build_image(
 /// (bright Earth + black space + specular glint): a mean is meaningless there, but the percentile
 /// tracks "how bright are the bright parts" and degrades gracefully. The clip fraction is the
 /// hard guard on top of it.
-fn meter(frame: &[u8], format: &FrameFormat, order: BayerOrder) -> (f32, f32) {
+fn meter(frame: &[u8], format: &FrameFormat, order: BayerOrder) -> MeterResult {
     const CLIP_LEVEL: usize = 250;
     const PERCENTILE: f32 = 0.95;
     let (width, height) = (format.width, format.height);
     let row_bytes = format.row_bytes();
     if frame.len() < format.bytes_per_frame() {
-        return (0.0, 0.0);
+        return MeterResult {
+            p_high: 0.0,
+            clip: 0.0,
+        };
     }
     let src = frame.as_ptr();
     // Even steps so we always land on the same-parity (green) sites; ~64 samples/axis.
@@ -265,7 +258,10 @@ fn meter(frame: &[u8], format: &FrameFormat, order: BayerOrder) -> (f32, f32) {
     }
 
     if count == 0 {
-        return (0.0, 0.0);
+        return MeterResult {
+            p_high: 0.0,
+            clip: 0.0,
+        };
     }
 
     // Percentile: smallest level whose cumulative count reaches PERCENTILE of the samples.
@@ -281,7 +277,10 @@ fn meter(frame: &[u8], format: &FrameFormat, order: BayerOrder) -> (f32, f32) {
     }
 
     let clipped: u64 = hist[CLIP_LEVEL..].iter().map(|&n| n as u64).sum();
-    (p_high as f32, clipped as f32 / count as f32)
+    MeterResult {
+        p_high: p_high as f32,
+        clip: clipped as f32 / count as f32,
+    }
 }
 
 // Read the 8 MSBs of the x-th pixel from a packed RAW10 row.

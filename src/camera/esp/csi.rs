@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use esp_idf_sys::*;
 
-use crate::camera::interface::CameraInterface;
 use crate::camera::{BayerOrder, CameraError, FrameFormat, PixelFormat};
 
 unsafe extern "C" {
@@ -59,8 +58,8 @@ pub struct CsiConfig {
 }
 
 /// The CSI + ISP transport. Push-based: frames stream continuously into the
-/// capture buffer via DMA; [`wait_frame`](CameraInterface::wait_frame) blocks
-/// on the frame-finished signal.
+/// capture buffer via DMA; [`wait_frame`](Self::wait_frame) blocks on the
+/// frame-finished signal.
 pub struct CsiInterface {
     _csi: esp_cam_ctlr_handle_t,
     buffer: Box<CaptureBuffer>,
@@ -180,10 +179,12 @@ impl CsiInterface {
     }
 }
 
-impl CameraInterface for CsiInterface {
-    type Error = CameraError;
-
-    fn wait_frame(&mut self, timeout: Duration) -> Result<&[u8], Self::Error> {
+impl CsiInterface {
+    /// Obtain the next complete raw frame, blocking until DMA delivers it or
+    /// `timeout` elapses. The returned slice lives in the capture buffer and is
+    /// only valid until the next call — the hardware may already be overwriting
+    /// it with the following frame.
+    pub fn wait_frame(&mut self, timeout: Duration) -> Result<&[u8], CameraError> {
         let mut waited = Duration::ZERO;
         while !FRAME_READY.swap(false, Ordering::AcqRel) {
             if waited >= timeout {

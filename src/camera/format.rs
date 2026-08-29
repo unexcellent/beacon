@@ -52,10 +52,8 @@ pub enum PixelFormat {
     Gray16,
 }
 
-/// What a sensor puts on the wire: the pairing contract between a
-/// [`CameraSensor`](super::sensor::CameraSensor) (which declares it) and a
-/// [`CameraInterface`](super::interface::CameraInterface) (which is configured
-/// with it).
+/// What a sensor puts on the wire: the pairing contract a sensor declares and
+/// its frame transport is configured with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameFormat {
     /// Width of the frame in pixels.
@@ -80,4 +78,14 @@ impl FrameFormat {
     pub fn bytes_per_frame(&self) -> usize {
         self.row_bytes() * self.height
     }
+}
+
+/// Color-processing seeds for a Bayer sensor, consumed by the demosaic pipeline.
+pub struct ColorCalibration {
+    /// The sensor's black-level pedestal in 8-bit space.
+    pub black_level: u8,
+    /// Initial white-balance red gain (green = 1.0 reference).
+    pub red_gain: f32,
+    /// Initial white-balance blue gain (green = 1.0 reference).
+    pub blue_gain: f32,
 }

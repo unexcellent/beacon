@@ -24,7 +24,6 @@ use std::time::Duration;
 
 use embedded_hal::i2c::I2c;
 
-use crate::camera::sensor::{CameraSensor, FrameTrigger};
 use crate::camera::{FrameFormat, PixelFormat};
 
 // ── MI48Dx I²C register map ──────────────────────────────────────────────────────
@@ -137,10 +136,9 @@ impl<I2C: I2c> Mi48<I2C> {
     }
 }
 
-impl<I2C: I2c> CameraSensor for Mi48<I2C> {
-    type Error = I2C::Error;
-
-    fn format(&self) -> FrameFormat {
+impl<I2C: I2c> Mi48<I2C> {
+    /// The raw frame format this sensor produces on its data interface.
+    pub fn format(&self) -> FrameFormat {
         FrameFormat {
             width: 160,
             height: 120,
@@ -151,7 +149,7 @@ impl<I2C: I2c> CameraSensor for Mi48<I2C> {
     /// Bring-up diagnostics and configuration. Deliberately infallible in the
     /// same way as the reference driver: an unresponsive chip is logged (every
     /// later capture then times out cleanly) rather than failing bring-up.
-    fn init(&mut self) -> Result<(), Self::Error> {
+    pub fn init(&mut self) -> Result<(), I2C::Error> {
         match self.read_reg(REG_STATUS) {
             Ok(s) => log::info!(
                 "MI48: I²C link OK at 0x{:02x} (STATUS=0x{s:02x})",
@@ -170,25 +168,24 @@ impl<I2C: I2c> CameraSensor for Mi48<I2C> {
     }
 
     /// Single-shot chip: nothing to start — each frame is armed via
-    /// [`trigger`](FrameTrigger::trigger).
-    fn start(&mut self) -> Result<(), Self::Error> {
+    /// [`trigger`](Self::trigger).
+    pub fn start(&mut self) -> Result<(), I2C::Error> {
         Ok(())
     }
 
     /// Leave the chip idle (clears FRAME_MODE) so the next trigger starts clean.
-    fn stop(&mut self) -> Result<(), Self::Error> {
+    pub fn stop(&mut self) -> Result<(), I2C::Error> {
         self.write_reg(REG_FRAME_MODE, 0x00)
     }
-}
 
-impl<I2C: I2c> FrameTrigger for Mi48<I2C> {
     /// Trigger exactly one single-shot frame, header stripped (NO_HEADER) →
     /// pure pixel data in the output frame buffer once ready.
-    fn trigger(&mut self) -> Result<(), Self::Error> {
+    pub fn trigger(&mut self) -> Result<(), I2C::Error> {
         self.write_reg(REG_FRAME_MODE, FRAME_MODE_SINGLE_FRAME | FRAME_MODE_NO_HEADER)
     }
 
-    fn frame_ready(&mut self) -> Result<bool, Self::Error> {
+    /// Whether a triggered frame has finished and is ready to read out.
+    pub fn frame_ready(&mut self) -> Result<bool, I2C::Error> {
         Ok(self.read_reg(REG_STATUS)? & STATUS_DATA_READY != 0)
     }
 }

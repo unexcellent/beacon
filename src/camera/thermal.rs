@@ -1,6 +1,6 @@
-//! A thermal camera: any single-shot [`FrameTrigger`] sensor emitting
-//! [`Gray16`](PixelFormat::Gray16) temperature frames, paired with any
-//! [`CameraInterface`], averaged and normalised into a greyscale [`Image`].
+//! The thermal camera: an MI48Dx single-shot sensor emitting
+//! [`Gray16`](PixelFormat::Gray16) temperature frames over the SPI frame
+//! transport, averaged and normalised into a greyscale [`Image`].
 //!
 //! We average several frames to suppress random per-pixel noise, normalise to a
 //! robust (percentile-clipped) range, map to greyscale and nearest-neighbour
@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use sstv::RgbPixel;
 
-use super::interface::CameraInterface;
-use super::sensor::FrameTrigger;
+use super::esp::{EspI2c, SpiFrameInterface};
+use super::sensors::Mi48;
 use super::{Camera, CameraError, Image, PixelFormat};
 
 /// Frames to capture and average after warm-up. Random per-pixel sensor noise is
@@ -25,9 +25,9 @@ const WARMUP_FRAMES: u32 = 5;
 /// reference's MI1602_DATA_READY_TIMEOUT_MS. Real frames arrive in tens of ms.
 const FRAME_TIMEOUT_MS: u32 = 2_000;
 
-pub struct ThermalCamera<S, I> {
-    sensor: S,
-    interface: I,
+pub struct ThermalCamera {
+    sensor: Mi48<EspI2c>,
+    interface: SpiFrameInterface,
     /// Sensor grid in pixels (from the sensor's frame format).
     size: (usize, usize),
     output: (usize, usize),
@@ -35,14 +35,14 @@ pub struct ThermalCamera<S, I> {
     mirror: bool,
 }
 
-impl<S: FrameTrigger, I: CameraInterface> ThermalCamera<S, I> {
+impl ThermalCamera {
     /// Compose an initialized sensor with its frame transport.
     ///
-    /// The sensor must already have had [`init`](super::sensor::CameraSensor::init)
-    /// run (board bring-up owns bus settling and diagnostics around it).
+    /// The sensor must already have had [`init`](Mi48::init) run (board bring-up
+    /// owns bus settling and diagnostics around it).
     pub fn try_new(
-        sensor: S,
-        interface: I,
+        sensor: Mi48<EspI2c>,
+        interface: SpiFrameInterface,
         output: (usize, usize),
         mirror: bool,
     ) -> Result<Self, CameraError> {
@@ -89,15 +89,14 @@ impl<S: FrameTrigger, I: CameraInterface> ThermalCamera<S, I> {
     }
 }
 
-impl<S: FrameTrigger, I: CameraInterface> Camera for ThermalCamera<S, I> {
+impl Camera for ThermalCamera {
     /// Single-shot sensors are triggered per frame and manage their own
     /// calibration, so there is nothing to power on.
     fn power_on(&mut self) {
         let _ = self.sensor.start();
     }
 
-    /// See [`power_on`](Self::power_on); [`stop`](super::sensor::CameraSensor::stop)
-    /// leaves the chip idle.
+    /// See [`power_on`](Self::power_on); [`stop`](Mi48::stop) leaves the chip idle.
     fn power_off(&mut self) {
         let _ = self.sensor.stop();
     }

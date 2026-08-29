@@ -1351,8 +1351,9 @@ dependencies = [
 
 [[package]]
 name = "sstv"
-version = "0.1.0"
-source = "git+https://github.com/unexcellent/sstv.git?branch=main#9962a9de4901f25d04d860494f1ff95246ede708"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d031ce328259d928e258fde653d928a2deba6e5a2774ded12dec61056596697"
 dependencies = [
  "libm",
 ]

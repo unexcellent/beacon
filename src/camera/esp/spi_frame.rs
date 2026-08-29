@@ -8,7 +8,6 @@ use std::time::Duration;
 use esp_idf_sys::*;
 
 use crate::camera::CameraError;
-use crate::camera::interface::CameraInterface;
 
 /// SPI wiring and readout parameters. The frame size comes from the sensor's
 /// [`FrameFormat`](crate::camera::FrameFormat) at construction.
@@ -26,9 +25,9 @@ pub struct SpiFrameConfig {
     pub cs_settle_us: u32,
 }
 
-/// Pull-based transport: [`wait_frame`](CameraInterface::wait_frame) clocks a
-/// frame out immediately, so callers must complete the readiness handshake
-/// (e.g. polling the sensor's DATA_READY status) first.
+/// Pull-based transport: [`wait_frame`](Self::wait_frame) clocks a frame out
+/// immediately, so callers must complete the readiness handshake (e.g. polling
+/// the sensor's DATA_READY status) first.
 ///
 /// CS is driven manually and stays asserted across the ENTIRE frame: the slave
 /// pauses on the SCLK gaps between chunks and resumes clocking out the same
@@ -97,12 +96,11 @@ impl SpiFrameInterface {
     }
 }
 
-impl CameraInterface for SpiFrameInterface {
-    type Error = CameraError;
-
+impl SpiFrameInterface {
     /// Clock one full frame out of the slave. The frame must already be ready;
     /// `timeout` is unused (the readout itself is bounded by the SPI clock).
-    fn wait_frame(&mut self, _timeout: Duration) -> Result<&[u8], Self::Error> {
+    /// The returned slice lives in the readout buffer, valid until the next call.
+    pub fn wait_frame(&mut self, _timeout: Duration) -> Result<&[u8], CameraError> {
         unsafe {
             gpio_set_level(self.cs_pin as gpio_num_t, 0);
             esp_rom_delay_us(self.cs_settle_us);

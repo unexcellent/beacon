@@ -8,7 +8,6 @@ use beacon::audio::{AudioChannel, AudioInterface, PCM5102A};
 use beacon::camera::esp::{
     CsiConfig, CsiInterface, EspI2c, I2cConfig, ResetPin, SpiFrameConfig, SpiFrameInterface,
 };
-use beacon::camera::sensor::CameraSensor;
 use beacon::camera::sensors::{Mi48, Sc850sl};
 use beacon::camera::{RgbCamera, ThermalCamera};
 use beacon::csp::{CspLink, CspLinkConfig};
@@ -26,8 +25,6 @@ use crate::link::{NODE, PayloadLink};
 pub const OUTPUT_WIDTH: usize = sstv::Mode::Robot36.image_width() as usize;
 pub const OUTPUT_HEIGHT: usize = sstv::Mode::Robot36.image_height() as usize;
 
-pub type RgbCam = RgbCamera<Sc850sl<EspI2c>, CsiInterface>;
-pub type ThermalCam = ThermalCamera<Mi48<EspI2c>, SpiFrameInterface>;
 
 /// Interface configuration for the Philips I2S standard at 16 kHz on the ESP32-P4.
 ///
@@ -94,7 +91,7 @@ const RGB_CSI: CsiConfig = CsiConfig {
     ldo_voltage_mv: 2500,
 };
 
-pub fn initialize_rgb_camera() -> Result<RgbCam> {
+pub fn initialize_rgb_camera() -> Result<RgbCamera> {
     log::info!("RGB camera: initializing...");
 
     let reset = ResetPin::new(RGB_XSHUTDN_PIN).map_err(|_| Error::RgbInit)?;
@@ -147,7 +144,7 @@ const THERMAL_SPI: SpiFrameConfig = SpiFrameConfig {
 /// and the MI48Dx come up. Matches the reference driver's 2 s post-reset wait.
 const THERMAL_BOOT_SETTLE_MS: u64 = 2_000;
 
-pub fn initialize_thermal_camera() -> Result<ThermalCam> {
+pub fn initialize_thermal_camera() -> Result<ThermalCamera> {
     log::info!("Thermal camera: initializing (MI1602 via MI48Dx)...");
 
     let i2c = EspI2c::new(I2cConfig {

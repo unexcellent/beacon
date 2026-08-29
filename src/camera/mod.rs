@@ -1,31 +1,21 @@
-//! Camera abstraction: sensors (control plane), interfaces (data plane), and
-//! the capture lifecycle that composes them.
+//! Camera abstraction: the application-facing [`Camera`] lifecycle and the two
+//! concrete cameras that implement it.
 //!
-//! The layering follows the split between *what chip is connected* and *how its
-//! frames arrive*:
-//!
-//! - [`sensor`] — control-plane traits. A [`CameraSensor`](sensor::CameraSensor)
-//!   is a chip driver over its register bus (`embedded-hal` I2C), with capability
-//!   traits for exposure control, Bayer calibration, and single-shot triggering.
-//! - [`interface`] — data-plane trait. A [`CameraInterface`](interface::CameraInterface)
-//!   delivers raw frames of a negotiated [`FrameFormat`], knowing nothing about
-//!   the chip that produces them.
-//! - [`Camera`] — the application-facing lifecycle both camera types implement.
-//!
-//! [`RgbCamera`] and [`ThermalCamera`] are generic compositions of one sensor,
-//! one interface, and a pixel pipeline. Platform transports live in [`esp`],
-//! chip drivers in [`sensors`].
+//! [`RgbCamera`] (SC850SL over CSI) and [`ThermalCamera`] (MI48Dx over SPI) each
+//! compose a chip driver from [`sensors`] with a frame transport from [`esp`]
+//! and a pixel pipeline. The drivers are register-level and generic over an
+//! `embedded-hal` bus; the transports are ESP32-P4 platform code. Only [`Camera`]
+//! is a trait — the pieces are concrete structs, not a swappable framework.
 
+mod auto_exposure;
 pub mod esp;
 mod format;
 mod image;
-pub mod interface;
 mod rgb;
-pub mod sensor;
 pub mod sensors;
 mod thermal;
 
-pub use format::{BayerOrder, FrameFormat, PixelFormat};
+pub use format::{BayerOrder, ColorCalibration, FrameFormat, PixelFormat};
 pub use image::Image;
 pub use rgb::RgbCamera;
 pub use thermal::ThermalCamera;

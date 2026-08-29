@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use embedded_hal::i2c::I2c;
 
-use crate::camera::sensor::{BayerSensor, CameraSensor, ColorCalibration, ExposureControl};
-use crate::camera::{BayerOrder, FrameFormat, PixelFormat};
+use crate::camera::{BayerOrder, ColorCalibration, FrameFormat, PixelFormat};
 
 /// Frame length in lines (VTS, regs 0x320e/0x320f in the init table). Bounds the exposure time.
 const VTS: u16 = 0x08ca;
@@ -42,10 +41,9 @@ impl<I2C: I2c> Sc850sl<I2C> {
     }
 }
 
-impl<I2C: I2c> CameraSensor for Sc850sl<I2C> {
-    type Error = I2C::Error;
-
-    fn format(&self) -> FrameFormat {
+impl<I2C: I2c> Sc850sl<I2C> {
+    /// The raw frame format this sensor produces on its data interface.
+    pub fn format(&self) -> FrameFormat {
         FrameFormat {
             width: 3840,
             height: 2160,
@@ -53,7 +51,8 @@ impl<I2C: I2c> CameraSensor for Sc850sl<I2C> {
         }
     }
 
-    fn init(&mut self) -> Result<(), Self::Error> {
+    /// Write the sensor's register init sequence, out of reset and not streaming.
+    pub fn init(&mut self) -> Result<(), I2C::Error> {
         // PLL latching regs require a settle delay after writing.
         const DELAYED_REGISTERS: [u16; 2] = [0x36e9, 0x36f9];
 
@@ -66,30 +65,34 @@ impl<I2C: I2c> CameraSensor for Sc850sl<I2C> {
         Ok(())
     }
 
-    fn start(&mut self) -> Result<(), Self::Error> {
+    /// Start streaming frames.
+    pub fn start(&mut self) -> Result<(), I2C::Error> {
         self.write(0x302c, 0x00)?;
         self.write(0x0100, 0x01)?;
         std::thread::sleep(Duration::from_millis(200));
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<(), Self::Error> {
+    /// Stop streaming and enter a low-power idle state.
+    pub fn stop(&mut self) -> Result<(), I2C::Error> {
         self.write(0x0100, 0x00)
     }
-}
 
-impl<I2C: I2c> ExposureControl for Sc850sl<I2C> {
+    /// Inclusive (min, max) integration time the sensor accepts, in lines.
+    ///
     /// Upper bound is VTS minus a small guard band (datasheet limit is VTS-4;
     /// we keep a couple of extra lines of margin).
-    fn exposure_range(&self) -> (u32, u32) {
+    pub fn exposure_range(&self) -> (u32, u32) {
         (1, (VTS as u32).saturating_sub(8).max(1))
     }
 
-    fn default_exposure(&self) -> u32 {
+    /// Integration time in lines after [`init`](Self::init).
+    pub fn default_exposure(&self) -> u32 {
         2080 // reg 0x3e01=0x82 in the init table -> 0x820 = 2080 lines
     }
 
-    fn max_gain(&self) -> f32 {
+    /// Largest usable analog gain as a linear multiplier.
+    pub fn max_gain(&self) -> f32 {
         48.0 // the analog-gain table tops out ~49.6x
     }
 
@@ -99,7 +102,7 @@ impl<I2C: I2c> ExposureControl for Sc850sl<I2C> {
     /// of 1/16 line: {0x3e00[3:0], 0x3e01[7:0], 0x3e02[7:4]} == lines << 4. Equivalently we
     /// write the 16-bit line count as 0x3e00=[15:12], 0x3e01=[11:4], 0x3e02=[3:0]<<4.
     /// (Packing per SmartSens datasheet V1.10 / MOVE-IIIa cmos_inttime_update.)
-    fn set_exposure(&mut self, lines: u32) -> Result<(), Self::Error> {
+    pub fn set_exposure(&mut self, lines: u32) -> Result<(), I2C::Error> {
         let (min, max) = self.exposure_range();
         let l = lines.clamp(min, max);
         self.write(0x3e00, ((l & 0xf000) >> 12) as u8)?;
@@ -110,7 +113,7 @@ impl<I2C: I2c> ExposureControl for Sc850sl<I2C> {
     /// Coarse gain (0x3e08) doubles per bucket — 0x03/0x07/0x23/0x27/0x2f/0x3f = 1/2/4/8/16/32x;
     /// fine gain (0x3e09) runs 0x40 (= bucket base) up to 0x7f (≈2x the base). Values and
     /// bucket layout are from the datasheet-derived AgainInfo table.
-    fn set_analog_gain(&mut self, gain: f32) -> Result<(), Self::Error> {
+    pub fn set_analog_gain(&mut self, gain: f32) -> Result<(), I2C::Error> {
         const BUCKETS: [(f32, u8); 6] = [
             (1.0, 0x03),
             (2.0, 0x07),
@@ -130,10 +133,9 @@ impl<I2C: I2c> ExposureControl for Sc850sl<I2C> {
         self.write(0x3e08, coarse)?;
         self.write(0x3e09, fine)
     }
-}
 
-impl<I2C: I2c> BayerSensor for Sc850sl<I2C> {
-    fn color_calibration(&self) -> ColorCalibration {
+    /// Color-processing seeds consumed by the demosaic pipeline.
+    pub fn color_calibration(&self) -> ColorCalibration {
         ColorCalibration {
             black_level: 16,
             red_gain: 1.5,
