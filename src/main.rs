@@ -4,6 +4,7 @@ mod link;
 mod transmit_sstv;
 mod update;
 
+use beacon::camera::Camera;
 use board::{Rs422Link, initialize_audio_channel, initialize_rgb_camera, initialize_thermal_camera};
 use error::{Error, ReportIfErr, Result};
 use link::{Command, CommandLink, Message};
@@ -25,8 +26,11 @@ fn main() {
         match link.receive().report_if_err(&link) {
             Ok(Some(Command::Sstv)) => {
                 link.send(Message::Busy);
-                let _ = transmit_sstv(rgb.as_mut().ok(), thermal.as_mut().ok(), &mut audio)
-                    .report_if_err(&link);
+                let cameras = vec![
+                    rgb.as_mut().ok().map(|c| c as &mut dyn Camera),
+                    thermal.as_mut().ok().map(|c| c as &mut dyn Camera),
+                ];
+                let _ = transmit_sstv(cameras, &mut audio).report_if_err(&link);
                 link.send(Message::Available);
             }
             Ok(Some(Command::UpdateAnnounced(chunk_size))) => {

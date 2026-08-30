@@ -5,26 +5,27 @@ use esp_idf_hal::delay;
 use sstv::{Encoder, Mode, Synthesizer};
 
 pub fn transmit_sstv(
-    rgb: Option<&mut impl Camera>,
-    thermal: Option<&mut impl Camera>,
+    cameras: Vec<Option<&mut dyn Camera>>,
     audio: &mut impl AudioChannel,
 ) -> Result<()> {
-    let rgb_image = capture_image(rgb);
-    let thermal_image = capture_image(thermal);
+    let images = capture_images_from_working_cameras(cameras);
 
-    if let Some(rgb_image) = rgb_image {
-        transmit_image(rgb_image, audio)?;
-        sleep(5);
-    }
-
-    if let Some(thermal_image) = thermal_image {
-        transmit_image(thermal_image, audio)?;
+    for (i, image) in images.into_iter().enumerate() {
+        let is_not_first_image = i > 0;
+        if is_not_first_image {
+            wait(5);
+        }
+        transmit_image(image, audio)?;
     }
 
     Ok(())
 }
 
-fn sleep(seconds: u32) {
+fn capture_images_from_working_cameras(cameras: Vec<Option<&mut dyn Camera>>) -> Vec<Image> {
+    cameras.into_iter().filter_map(capture_image).collect()
+}
+
+fn wait(seconds: u32) {
     log::info!("Waiting {} seconds...", seconds);
     delay::FreeRtos::delay_ms(seconds * 1_000);
 }

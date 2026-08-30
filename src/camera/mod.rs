@@ -61,6 +61,6 @@ pub trait Camera {
 }
 
 /// Capture one frame, or None if the camera is unavailable (failed to initialize).
-pub fn capture_image<C: Camera>(camera: Option<&mut C>) -> Option<Image> {
+pub fn capture_image<C: Camera + ?Sized>(camera: Option<&mut C>) -> Option<Image> {
     camera.map(|cam| cam.capture())
 }
