@@ -9,7 +9,7 @@ use beacon::camera::esp::{
     CsiConfig, CsiInterface, EspI2c, I2cConfig, ResetPin, SpiFrameConfig, SpiFrameInterface,
 };
 use beacon::camera::sensors::{Mi48, Sc850sl};
-use beacon::csp::{CspLink, CspLinkConfig};
+use crate::link::csp::{CspLink, CspLinkConfig};
 use esp_idf_hal::{
     gpio::{AnyIOPin, PinDriver},
     peripherals::Peripherals,

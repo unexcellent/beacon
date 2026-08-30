@@ -14,7 +14,7 @@ mod arch;
 
 use std::time::Duration;
 
-use crate::kiss;
+use super::kiss;
 
 /// CSP's standard ping/echo service port.
 const PING_PORT: u8 = 1;
