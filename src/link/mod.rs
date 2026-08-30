@@ -28,7 +28,7 @@ pub const NODE: u16 = 7;
 
 /// The mission's view of the payload link: transmit [`Message`]s and poll for
 /// inbound [`Command`]s. [`PayloadLink`] is the hardware-backed implementation;
-/// depending on the trait lets the OTA and error-reporting logic run against a
+/// depending on the trait lets the update and error-reporting logic run against a
 /// stand-in link off-target.
 pub trait CommandLink {
     /// Transmit a message via the link.

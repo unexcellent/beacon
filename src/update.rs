@@ -1,5 +1,5 @@
-//! Firmware update (OTA): receives the announced image chunk by chunk via the
-//! payload link, writes it to the next OTA partition and reboots into it.
+//! Firmware update: receives the announced image chunk by chunk via the
+//! payload link, writes it to the next update partition and reboots into it.
 
 use core::ptr;
 
@@ -11,7 +11,9 @@ use esp_idf_sys::{
 use crate::link::{Command, CommandLink};
 use crate::error::{Error, Result};
 
-const OTA_WITH_SEQUENTIAL_WRITES: usize = 0xFFFFFFFE;
+/// ESP-IDF's `OTA_WITH_SEQUENTIAL_WRITES` sentinel for `esp_ota_begin`: image
+/// size unknown, written sequentially.
+const UPDATE_WITH_SEQUENTIAL_WRITES: usize = 0xFFFFFFFE;
 
 /// Run one firmware update session after its announcement. Keeps polling the
 /// link until the transfer completes (which reboots into the new firmware) or
@@ -23,7 +25,7 @@ pub fn update<L: CommandLink>(chunk_size: u16, link: &mut L) -> Result<()> {
     loop {
         match link.receive()? {
             Some(Command::UpdateAnnounced(size)) => {
-                log::warn!("OTA: aborting in-progress session on new announce");
+                log::warn!("update: aborting in-progress session on new announce");
                 update(size, link)?;
             }
             Some(Command::UpdateBegin(total)) => state.begin(total, chunk_size)?,
@@ -83,7 +85,7 @@ impl Writer {
             }
 
             let mut handle: esp_ota_handle_t = 0;
-            let result = esp_ota_begin(partition, OTA_WITH_SEQUENTIAL_WRITES, &mut handle);
+            let result = esp_ota_begin(partition, UPDATE_WITH_SEQUENTIAL_WRITES, &mut handle);
             if result != ESP_OK as esp_err_t {
                 return Err(Error::UpdateBegin);
             }
@@ -130,7 +132,7 @@ impl Writer {
     }
 
     /// The relay may append 4 bytes (CRC without flag) and/or batch multiple
-    /// consecutive OTA packets into one CSP frame. Strip trailing bytes that
+    /// consecutive update packets into one CSP frame. Strip trailing bytes that
     /// are relay overhead: anything beyond the last complete chunk, unless the
     /// remaining firmware bytes are smaller than chunk_size (final chunk).
     fn strip_relay_overhead<'a>(&self, base_offset: u32, raw: &'a [u8]) -> &'a [u8] {

@@ -1,45 +1,45 @@
-//! The [`PayloadLink`] device: the mission's OTA / command service sockets over
+//! The [`PayloadLink`] device: the mission's update / command service sockets over
 //! a CSP node, implementing [`CommandLink`].
 
 use std::collections::VecDeque;
 
-use super::command::parse_ota_packet;
+use super::command::parse_update_packet;
 use super::csp::{CspLink, SerialRead};
 use super::kiss;
 use super::{Command, CommandLink, Message};
 use crate::{Error, Result};
 
-const OTA_PORT: u8 = 10;
+const UPDATE_PORT: u8 = 10;
 const CMD_PORT: u8 = 11;
 
 pub struct PayloadLink<R> {
     csp: CspLink<R>,
-    ota_sock: libcsp::Socket,
+    update_sock: libcsp::Socket,
     cmd_sock: libcsp::Socket,
     /// Commands already received but not yet handed out by [`Self::receive`].
     commands: VecDeque<Command>,
 }
 
 impl<R: SerialRead> PayloadLink<R> {
-    /// Bind the OTA / command service sockets on the brought-up CSP node. The
+    /// Bind the update / command service sockets on the brought-up CSP node. The
     /// node owns the serial transport and is pumped via its `poll`.
     pub fn try_new(csp: CspLink<R>) -> Result<Self> {
-        let ota_sock = csp.bind(OTA_PORT).map_err(|_| Error::CspInit)?;
+        let update_sock = csp.bind(UPDATE_PORT).map_err(|_| Error::CspInit)?;
         let cmd_sock = csp.bind(CMD_PORT).map_err(|_| Error::CspInit)?;
 
         Ok(Self {
             csp,
-            ota_sock,
+            update_sock,
             cmd_sock,
             commands: VecDeque::new(),
         })
     }
 
-    /// Drain the OTA and command sockets into the internal command queue.
+    /// Drain the update and command sockets into the internal command queue.
     fn collect_commands(&mut self) {
-        while let Some(conn) = self.ota_sock.accept(0) {
+        while let Some(conn) = self.update_sock.accept(0) {
             while let Some(pkt) = conn.read(0) {
-                if let Some(cmd) = parse_ota_packet(pkt.data()) {
+                if let Some(cmd) = parse_update_packet(pkt.data()) {
                     self.commands.push_back(cmd);
                 }
             }
