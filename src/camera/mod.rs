@@ -1,24 +1,23 @@
 //! Camera abstraction: the application-facing [`Camera`] lifecycle and the two
-//! concrete cameras that implement it.
+//! cameras that implement it.
 //!
-//! [`RgbCamera`] (SC850SL over CSI) and [`ThermalCamera`] (MI48Dx over SPI) each
-//! compose a chip driver from [`sensors`] with a frame transport from [`esp`]
-//! and a pixel pipeline. The drivers are register-level and generic over an
-//! `embedded-hal` bus; the transports are ESP32-P4 platform code. Only [`Camera`]
-//! is a trait — the pieces are concrete structs, not a swappable framework.
+//! Each camera is a sensor driver ([`Sc850sl`](sensors::Sc850sl) for RGB,
+//! [`Mi48`](sensors::Mi48) for thermal) that owns a [`CameraInterface`] and a
+//! pixel pipeline. The drivers carry no platform code — all ESP32-P4 logic (the
+//! I2C bus and the CSI/SPI frame transport) lives behind the interface, in
+//! [`esp`]. `Camera` is the outward lifecycle; `CameraInterface` is the inward
+//! platform boundary the sensors depend on.
 
 mod auto_exposure;
 pub mod esp;
 mod format;
 mod image;
-mod rgb;
+pub mod interface;
 pub mod sensors;
-mod thermal;
 
 pub use format::{BayerOrder, ColorCalibration, FrameFormat, PixelFormat};
 pub use image::Image;
-pub use rgb::RgbCamera;
-pub use thermal::ThermalCamera;
+pub use interface::CameraInterface;
 
 /// Error raised while bringing up or operating a camera.
 #[derive(Clone, Copy, Debug)]

@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use esp_idf_sys::*;
 
-use crate::camera::CameraError;
+use super::EspI2c;
+use crate::camera::{CameraError, CameraInterface};
 
 /// SPI wiring and readout parameters. The frame size comes from the sensor's
 /// [`FrameFormat`](crate::camera::FrameFormat) at construction.
@@ -33,6 +34,7 @@ pub struct SpiFrameConfig {
 /// pauses on the SCLK gaps between chunks and resumes clocking out the same
 /// frame, so releasing CS mid-frame would desync it.
 pub struct SpiFrameInterface {
+    i2c: EspI2c,
     spi: spi_device_handle_t,
     cs_pin: i32,
     chunk_bytes: usize,
@@ -43,7 +45,13 @@ pub struct SpiFrameInterface {
 }
 
 impl SpiFrameInterface {
-    pub fn new(config: SpiFrameConfig, frame_bytes: usize) -> Result<Self, CameraError> {
+    /// `i2c` is the control bus to the sensor; the SPI readout is configured
+    /// from `config` for frames of `frame_bytes`.
+    pub fn new(
+        i2c: EspI2c,
+        config: SpiFrameConfig,
+        frame_bytes: usize,
+    ) -> Result<Self, CameraError> {
         unsafe {
             let mut bus: spi_bus_config_t = core::mem::zeroed();
             bus.__bindgen_anon_1.mosi_io_num = config.mosi_pin;
@@ -85,6 +93,7 @@ impl SpiFrameInterface {
             assert!(!rx_buf.is_null(), "SPI frame buffer allocation failed");
 
             Ok(Self {
+                i2c,
                 spi: handle,
                 cs_pin: config.cs_pin,
                 chunk_bytes: config.chunk_bytes,
@@ -96,11 +105,17 @@ impl SpiFrameInterface {
     }
 }
 
-impl SpiFrameInterface {
+impl CameraInterface for SpiFrameInterface {
+    type Bus = EspI2c;
+
+    fn bus(&mut self) -> &mut EspI2c {
+        &mut self.i2c
+    }
+
     /// Clock one full frame out of the slave. The frame must already be ready;
     /// `timeout` is unused (the readout itself is bounded by the SPI clock).
     /// The returned slice lives in the readout buffer, valid until the next call.
-    pub fn wait_frame(&mut self, _timeout: Duration) -> Result<&[u8], CameraError> {
+    fn wait_frame(&mut self, _timeout: Duration) -> Result<&[u8], CameraError> {
         unsafe {
             gpio_set_level(self.cs_pin as gpio_num_t, 0);
             esp_rom_delay_us(self.cs_settle_us);

@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use esp_idf_sys::*;
 
-use crate::camera::{BayerOrder, CameraError, FrameFormat, PixelFormat};
+use super::EspI2c;
+use crate::camera::{BayerOrder, CameraError, CameraInterface, FrameFormat, PixelFormat};
 
 unsafe extern "C" {
     fn isp_bypass_raw10_patch(h_res: u32, v_res: u32);
@@ -61,12 +62,15 @@ pub struct CsiConfig {
 /// capture buffer via DMA; [`wait_frame`](Self::wait_frame) blocks on the
 /// frame-finished signal.
 pub struct CsiInterface {
+    i2c: EspI2c,
     _csi: esp_cam_ctlr_handle_t,
     buffer: Box<CaptureBuffer>,
 }
 
 impl CsiInterface {
-    pub fn new(config: CsiConfig, format: &FrameFormat) -> Result<Self, CameraError> {
+    /// `i2c` is the control bus to the sensor; the CSI hardware itself is
+    /// configured from `config` and the sensor's `format`.
+    pub fn new(i2c: EspI2c, config: CsiConfig, format: &FrameFormat) -> Result<Self, CameraError> {
         let (color_type, bayer_order) = match format.pixel {
             PixelFormat::Raw10(order) => (cam_ctlr_color_t_CAM_CTLR_COLOR_RAW10, order),
             PixelFormat::Raw8(order) => (cam_ctlr_color_t_CAM_CTLR_COLOR_RAW8, order),
@@ -93,7 +97,11 @@ impl CsiInterface {
                 return Err(CameraError::Transport);
             }
 
-            Ok(Self { _csi: csi, buffer })
+            Ok(Self {
+                i2c,
+                _csi: csi,
+                buffer,
+            })
         }
     }
 
@@ -179,12 +187,18 @@ impl CsiInterface {
     }
 }
 
-impl CsiInterface {
+impl CameraInterface for CsiInterface {
+    type Bus = EspI2c;
+
+    fn bus(&mut self) -> &mut EspI2c {
+        &mut self.i2c
+    }
+
     /// Obtain the next complete raw frame, blocking until DMA delivers it or
     /// `timeout` elapses. The returned slice lives in the capture buffer and is
     /// only valid until the next call — the hardware may already be overwriting
     /// it with the following frame.
-    pub fn wait_frame(&mut self, timeout: Duration) -> Result<&[u8], CameraError> {
+    fn wait_frame(&mut self, timeout: Duration) -> Result<&[u8], CameraError> {
         let mut waited = Duration::ZERO;
         while !FRAME_READY.swap(false, Ordering::AcqRel) {
             if waited >= timeout {

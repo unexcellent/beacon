@@ -1,5 +1,6 @@
-//! Driver for the MI48Dx thermal-image processor paired with a SenXor™ LWIR
-//! sensor (MI1602: raw 160×120).
+//! The MI48Dx thermal-image processor paired with a SenXor™ LWIR sensor
+//! (MI1602: raw 160×120), as a thermal camera: register control plus the
+//! frame-averaging / normalisation pipeline.
 //!
 //! The raw sensor cannot be read directly; the MI48Dx performs per-pixel
 //! calibration, bad-pixel correction and raw→temperature conversion, so the
@@ -7,8 +8,8 @@
 //!
 //! ```text
 //! MI1602 ──SenXor bus──► MI48Dx ──► host
-//!                          I²C  (register control — this driver)
-//!                          SPI  (thermal frame readout — SpiFrameInterface)
+//!                          I²C  (register control, via the interface bus)
+//!                          SPI  (thermal frame readout, via the interface)
 //!                          DATA_READY (mirrored in STATUS, polled over I²C)
 //! ```
 //!
@@ -16,15 +17,17 @@
 //! MSB first on the wire ([`PixelFormat::Gray16`]).
 //!
 //! The chip clock-stretches SCL for tens of ms while busy (notably during boot
-//! and between register accesses); the I2C bus it is handed must tolerate that
-//! (e.g. `scl_wait_us` ≈ 50 ms on esp-idf) or writes fail outright while short
-//! reads occasionally squeak through.
+//! and between register accesses); the I2C bus behind the interface must tolerate
+//! that (e.g. `scl_wait_us` ≈ 50 ms on esp-idf) or writes fail outright while
+//! short reads occasionally squeak through. All ESP32 logic lives behind the
+//! [`CameraInterface`]; this driver is platform-agnostic.
 
 use std::time::Duration;
 
-use embedded_hal::i2c::I2c;
+use embedded_hal::i2c::{ErrorType, I2c};
+use sstv::RgbPixel;
 
-use crate::camera::{FrameFormat, PixelFormat};
+use crate::camera::{Camera, CameraInterface, FrameFormat, Image, PixelFormat};
 
 // ── MI48Dx I²C register map ──────────────────────────────────────────────────────
 const REG_FRAME_MODE: u8 = 0xB1;
@@ -56,29 +59,61 @@ const FILTER_MEDIAN_ON: u8 = 0x01;
 /// MI1602_BOOT_TIMEOUT_MS. pysenxor polls with no timeout at all; 3 s is a safe bound.
 const BOOT_TIMEOUT_MS: u32 = 3_000;
 
-pub struct Mi48<I2C> {
-    i2c: I2C,
+/// Frames to capture and average after warm-up. Random per-pixel sensor noise is
+/// uncorrelated between frames, so averaging N frames cuts its amplitude by ~√N —
+/// the main lever against the salt-and-pepper speckle in a single raw frame.
+const AVERAGE_FRAMES: u32 = 8;
+/// Frames to capture and discard on activation so the on-chip temporal/median
+/// filters converge before the kept capture.
+const WARMUP_FRAMES: u32 = 5;
+/// Per-frame timeout waiting for the sensor to report frame-ready, matching the
+/// reference's MI1602_DATA_READY_TIMEOUT_MS. Real frames arrive in tens of ms.
+const FRAME_TIMEOUT_MS: u32 = 2_000;
+
+pub struct Mi48<I> {
+    interface: I,
     address: u8,
+    /// Sensor grid in pixels (from the sensor's frame format).
+    size: (usize, usize),
+    output: (usize, usize),
+    /// Mirror left↔right so the scene matches a co-mounted camera's orientation.
+    mirror: bool,
 }
 
-impl<I2C> Mi48<I2C> {
+impl<I> Mi48<I> {
     /// 7-bit I2C address with the ADDR pin strapped high (the reference's
     /// working strap); strapped low it is 0x40.
     pub const DEFAULT_I2C_ADDRESS: u8 = 0x41;
 
-    pub fn new(i2c: I2C, address: u8) -> Self {
-        Self { i2c, address }
+    /// The raw frame format this sensor produces on its data interface. Exposed
+    /// as a constant so the transport can be sized before the camera exists.
+    pub const FORMAT: FrameFormat = FrameFormat {
+        width: 160,
+        height: 120,
+        pixel: PixelFormat::Gray16,
+    };
+
+    /// Wrap a frame transport (which also carries the I2C control bus) as a
+    /// thermal camera. `address` is the board-strapped 7-bit I2C address.
+    pub fn new(interface: I, address: u8, output: (usize, usize), mirror: bool) -> Self {
+        Self {
+            interface,
+            address,
+            size: (Self::FORMAT.width, Self::FORMAT.height),
+            output,
+            mirror,
+        }
     }
 }
 
-impl<I2C: I2c> Mi48<I2C> {
-    fn write_reg(&mut self, reg: u8, val: u8) -> Result<(), I2C::Error> {
-        self.i2c.write(self.address, &[reg, val])
+impl<I: CameraInterface> Mi48<I> {
+    fn write_reg(&mut self, reg: u8, val: u8) -> Result<(), <I::Bus as ErrorType>::Error> {
+        self.interface.bus().write(self.address, &[reg, val])
     }
 
-    fn read_reg(&mut self, reg: u8) -> Result<u8, I2C::Error> {
+    fn read_reg(&mut self, reg: u8) -> Result<u8, <I::Bus as ErrorType>::Error> {
         let mut val = [0u8];
-        self.i2c.write_read(self.address, &[reg], &mut val)?;
+        self.interface.bus().write_read(self.address, &[reg], &mut val)?;
         Ok(val[0])
     }
 
@@ -134,22 +169,11 @@ impl<I2C: I2c> Mi48<I2C> {
         }
         std::thread::sleep(Duration::from_millis(60));
     }
-}
-
-impl<I2C: I2c> Mi48<I2C> {
-    /// The raw frame format this sensor produces on its data interface.
-    pub fn format(&self) -> FrameFormat {
-        FrameFormat {
-            width: 160,
-            height: 120,
-            pixel: PixelFormat::Gray16,
-        }
-    }
 
     /// Bring-up diagnostics and configuration. Deliberately infallible in the
     /// same way as the reference driver: an unresponsive chip is logged (every
     /// later capture then times out cleanly) rather than failing bring-up.
-    pub fn init(&mut self) -> Result<(), I2C::Error> {
+    pub fn init(&mut self) -> Result<(), <I::Bus as ErrorType>::Error> {
         match self.read_reg(REG_STATUS) {
             Ok(s) => log::info!(
                 "MI48: I²C link OK at 0x{:02x} (STATUS=0x{s:02x})",
@@ -167,25 +191,145 @@ impl<I2C: I2c> Mi48<I2C> {
         Ok(())
     }
 
-    /// Single-shot chip: nothing to start — each frame is armed via
-    /// [`trigger`](Self::trigger).
-    pub fn start(&mut self) -> Result<(), I2C::Error> {
+    /// Single-shot chip: nothing to start — each frame is armed via `trigger`.
+    fn start(&mut self) -> Result<(), <I::Bus as ErrorType>::Error> {
         Ok(())
     }
 
     /// Leave the chip idle (clears FRAME_MODE) so the next trigger starts clean.
-    pub fn stop(&mut self) -> Result<(), I2C::Error> {
+    fn stop(&mut self) -> Result<(), <I::Bus as ErrorType>::Error> {
         self.write_reg(REG_FRAME_MODE, 0x00)
     }
 
     /// Trigger exactly one single-shot frame, header stripped (NO_HEADER) →
     /// pure pixel data in the output frame buffer once ready.
-    pub fn trigger(&mut self) -> Result<(), I2C::Error> {
+    fn trigger(&mut self) -> Result<(), <I::Bus as ErrorType>::Error> {
         self.write_reg(REG_FRAME_MODE, FRAME_MODE_SINGLE_FRAME | FRAME_MODE_NO_HEADER)
     }
 
     /// Whether a triggered frame has finished and is ready to read out.
-    pub fn frame_ready(&mut self) -> Result<bool, I2C::Error> {
+    fn frame_ready(&mut self) -> Result<bool, <I::Bus as ErrorType>::Error> {
         Ok(self.read_reg(REG_STATUS)? & STATUS_DATA_READY != 0)
     }
+
+    /// Trigger and read exactly one single-shot frame. Returns None (and leaves
+    /// the chip idle) on timeout or a failed readout.
+    fn capture_one(&mut self) -> Option<&[u8]> {
+        if let Err(e) = self.trigger() {
+            log::warn!("thermal: frame trigger write failed: {e:?}");
+        }
+
+        let mut waited = 0u32;
+        let ready = loop {
+            if matches!(self.frame_ready(), Ok(true)) {
+                break true;
+            }
+            if waited >= FRAME_TIMEOUT_MS {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            waited += 5;
+        };
+
+        if !ready {
+            // Leave the chip idle so the next trigger starts clean.
+            let _ = self.stop();
+            log::warn!("thermal: frame timed out waiting for frame-ready");
+            return None;
+        }
+        self.interface.wait_frame(Duration::ZERO).ok()
+    }
+}
+
+impl<I: CameraInterface> Camera for Mi48<I> {
+    /// Single-shot sensors are triggered per frame and manage their own
+    /// calibration, so there is nothing to power on.
+    fn power_on(&mut self) {
+        let _ = self.start();
+    }
+
+    /// Leaves the chip idle.
+    fn power_off(&mut self) {
+        let _ = self.stop();
+    }
+
+    /// Capture and discard warm-up frames so on-chip temporal/median filters —
+    /// which keep state across captures — converge before the frames we keep.
+    fn calibrate(&mut self) {
+        for _ in 0..WARMUP_FRAMES {
+            self.capture_one();
+        }
+    }
+
+    /// Average [`AVERAGE_FRAMES`] frames per pixel, then map the result to a
+    /// greyscale, upscaled [`Image`]. Random sensor noise is uncorrelated between
+    /// frames, so the mean converges to the true temperature while the noise
+    /// shrinks by ~√N — this is what kills the salt-and-pepper speckle. Call
+    /// [`calibrate`](Self::calibrate) first so the on-chip filters have settled.
+    fn receive_frame(&mut self) -> Image {
+        let words_per_frame = self.size.0 * self.size.1;
+        let mut acc = vec![0u32; words_per_frame];
+        let mut n = 0u32;
+        for _ in 0..AVERAGE_FRAMES {
+            if let Some(frame) = self.capture_one()
+                && frame.len() >= words_per_frame * 2
+            {
+                for (i, slot) in acc.iter_mut().enumerate() {
+                    *slot += u16::from_be_bytes([frame[2 * i], frame[2 * i + 1]]) as u32;
+                }
+                n += 1;
+            }
+        }
+
+        if n == 0 {
+            log::error!("thermal: no frame captured — producing a blank image");
+            return build_image(
+                &vec![0u16; words_per_frame],
+                self.size,
+                self.output,
+                self.mirror,
+            );
+        }
+        let averaged: Vec<u16> = acc.iter().map(|&s| (s / n) as u16).collect();
+        build_image(&averaged, self.size, self.output, self.mirror)
+    }
+}
+
+/// Turn an averaged temperature frame into a greyscale, nearest-neighbour
+/// scaled [`Image`], optionally flipped horizontally.
+fn build_image(words: &[u16], size: (usize, usize), output: (usize, usize), mirror: bool) -> Image {
+    let (src_w, src_h) = size;
+    let (out_w, out_h) = output;
+
+    // Robust auto-scale: clip the coldest and hottest ~1% of pixels before choosing the
+    // black/white points. A few outlier/noisy pixels would otherwise stretch the whole
+    // range and wash the low-contrast scene out into amplified noise.
+    let mut sorted = words.to_vec();
+    sorted.sort_unstable();
+    let trim = sorted.len() / 100;
+    let min = sorted[trim];
+    let max = sorted[sorted.len() - 1 - trim];
+    let range = (max.saturating_sub(min)).max(1) as f32;
+
+    let mut pixels = Vec::with_capacity(out_w * out_h);
+    for oy in 0..out_h {
+        let sy = oy * src_h / out_h;
+        for ox in 0..out_w {
+            let mut sx = ox * src_w / out_w;
+            if mirror {
+                sx = (src_w - 1) - sx;
+            }
+            let v = words[sy * src_w + sx];
+            let norm = v.saturating_sub(min) as f32 / range;
+            pixels.push(grayscale(norm));
+        }
+    }
+    Image::from_pixels(out_w, out_h, pixels)
+}
+
+/// Map a normalised temperature in `[0, 1]` to a greyscale pixel
+/// (black = coldest, white = hottest).
+fn grayscale(t: f32) -> RgbPixel {
+    let g = (t.clamp(0.0, 1.0) * 255.0) as u8;
+    RgbPixel::new(g, g, g)
 }

@@ -9,7 +9,6 @@ use beacon::camera::esp::{
     CsiConfig, CsiInterface, EspI2c, I2cConfig, ResetPin, SpiFrameConfig, SpiFrameInterface,
 };
 use beacon::camera::sensors::{Mi48, Sc850sl};
-use beacon::camera::{RgbCamera, ThermalCamera};
 use beacon::csp::{CspLink, CspLinkConfig};
 use esp_idf_hal::{
     gpio::{AnyIOPin, PinDriver},
@@ -91,7 +90,7 @@ const RGB_CSI: CsiConfig = CsiConfig {
     ldo_voltage_mv: 2500,
 };
 
-pub fn initialize_rgb_camera() -> Result<RgbCamera> {
+pub fn initialize_rgb_camera() -> Result<Sc850sl<CsiInterface>> {
     log::info!("RGB camera: initializing...");
 
     let reset = ResetPin::new(RGB_XSHUTDN_PIN).map_err(|_| Error::RgbInit)?;
@@ -110,16 +109,20 @@ pub fn initialize_rgb_camera() -> Result<RgbCamera> {
     .map_err(|_| Error::RgbInit)?;
     reset.release(Duration::from_millis(300));
 
-    let mut sensor = Sc850sl::new(i2c, Sc850sl::<EspI2c>::DEFAULT_I2C_ADDRESS);
-    if sensor.init().is_err() {
+    let format = Sc850sl::<CsiInterface>::FORMAT;
+    let interface = CsiInterface::new(i2c, RGB_CSI, &format).map_err(|_| Error::RgbInit)?;
+    let mut camera = Sc850sl::new(
+        interface,
+        Sc850sl::<CsiInterface>::DEFAULT_I2C_ADDRESS,
+        (OUTPUT_WIDTH, OUTPUT_HEIGHT),
+    );
+    if camera.init().is_err() {
         log::warn!("Sensor init failed, retrying after reset");
         reset.assert(Duration::from_millis(500));
         reset.release(Duration::from_millis(300));
-        sensor.init().map_err(|_| Error::RgbInit)?;
+        camera.init().map_err(|_| Error::RgbInit)?;
     }
-
-    let interface = CsiInterface::new(RGB_CSI, &sensor.format()).map_err(|_| Error::RgbInit)?;
-    RgbCamera::try_new(sensor, interface, (OUTPUT_WIDTH, OUTPUT_HEIGHT)).map_err(|_| Error::RgbInit)
+    Ok(camera)
 }
 
 const THERMAL_CS_PIN: i32 = 31;
@@ -144,7 +147,7 @@ const THERMAL_SPI: SpiFrameConfig = SpiFrameConfig {
 /// and the MI48Dx come up. Matches the reference driver's 2 s post-reset wait.
 const THERMAL_BOOT_SETTLE_MS: u64 = 2_000;
 
-pub fn initialize_thermal_camera() -> Result<ThermalCamera> {
+pub fn initialize_thermal_camera() -> Result<Mi48<SpiFrameInterface>> {
     log::info!("Thermal camera: initializing (MI1602 via MI48Dx)...");
 
     let i2c = EspI2c::new(I2cConfig {
@@ -162,14 +165,17 @@ pub fn initialize_thermal_camera() -> Result<ThermalCamera> {
     std::thread::sleep(Duration::from_millis(THERMAL_BOOT_SETTLE_MS));
     scan_thermal_bus(&i2c);
 
-    let mut sensor = Mi48::new(i2c, Mi48::<EspI2c>::DEFAULT_I2C_ADDRESS);
-    let frame_bytes = sensor.format().bytes_per_frame();
-    sensor.init().map_err(|_| Error::ThermalInit)?;
-
+    let frame_bytes = Mi48::<SpiFrameInterface>::FORMAT.bytes_per_frame();
     let interface =
-        SpiFrameInterface::new(THERMAL_SPI, frame_bytes).map_err(|_| Error::ThermalInit)?;
-    ThermalCamera::try_new(sensor, interface, (OUTPUT_WIDTH, OUTPUT_HEIGHT), true)
-        .map_err(|_| Error::ThermalInit)
+        SpiFrameInterface::new(i2c, THERMAL_SPI, frame_bytes).map_err(|_| Error::ThermalInit)?;
+    let mut camera = Mi48::new(
+        interface,
+        Mi48::<SpiFrameInterface>::DEFAULT_I2C_ADDRESS,
+        (OUTPUT_WIDTH, OUTPUT_HEIGHT),
+        true,
+    );
+    camera.init().map_err(|_| Error::ThermalInit)?;
+    Ok(camera)
 }
 
 /// Ground-truth diagnostics: who is actually on the I²C bus, and does the
@@ -177,7 +183,7 @@ pub fn initialize_thermal_camera() -> Result<ThermalCamera> {
 /// our own address returns so a broken bus (INVALID_STATE) is distinguishable
 /// from an empty one (NOT_FOUND).
 fn scan_thermal_bus(i2c: &EspI2c) {
-    let addr = Mi48::<EspI2c>::DEFAULT_I2C_ADDRESS;
+    let addr = Mi48::<SpiFrameInterface>::DEFAULT_I2C_ADDRESS;
     let found = i2c.scan();
     match found.len() {
         0 => log::error!(
