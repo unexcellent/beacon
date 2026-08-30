@@ -15,6 +15,10 @@ mod image;
 pub mod interface;
 pub mod sensors;
 
+/// MOVE-IIIa carrier bring-up.
+#[path = "move-iiia.rs"]
+pub mod move_iiia;
+
 pub use format::{BayerOrder, ColorCalibration, FrameFormat, PixelFormat};
 pub use image::Image;
 pub use interface::CameraInterface;

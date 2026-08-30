@@ -12,6 +12,10 @@ mod i2s;
 mod interface;
 mod pcm5102a;
 
+/// MOVE-IIIa carrier bring-up.
+#[path = "move-iiia.rs"]
+pub mod move_iiia;
+
 pub use encoder::AudioEncoder;
 pub use i2s::{I2sConfig, I2sInterface};
 pub use interface::AudioInterface;

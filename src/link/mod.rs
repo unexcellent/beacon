@@ -17,6 +17,10 @@ mod command;
 mod message;
 mod payload_link;
 
+/// MOVE-IIIa carrier bring-up.
+#[path = "move-iiia.rs"]
+pub mod move_iiia;
+
 pub use command::Command;
 pub use message::Message;
 pub use payload_link::PayloadLink;

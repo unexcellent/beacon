@@ -1,97 +1,19 @@
-//! Board bring-up for the MOVE-IIIa carrier: pin maps, bus construction,
-//! reset sequencing and diagnostics for every peripheral. Everything chip- or
-//! transport-generic lives in the `beacon` library; this module is the wiring.
+//! MOVE-IIIa carrier camera bring-up: the SC850SL RGB camera over CSI and the
+//! MI48Dx thermal camera over SPI.
 
 use std::time::Duration;
 
-use beacon::audio::{I2sConfig, I2sInterface, Pcm5102a};
-use beacon::camera::esp::{
-    CsiConfig, CsiInterface, EspI2c, I2cConfig, ResetPin, SpiFrameConfig, SpiFrameInterface,
-};
-use beacon::camera::sensors::{Mi48, Sc850sl};
-use beacon::link::csp::{CspLink, CspLinkConfig};
-use esp_idf_hal::{
-    gpio::{AnyIOPin, PinDriver},
-    peripherals::Peripherals,
-    uart::{self, UartDriver, UartRxDriver},
-    units::Hertz,
-};
 use esp_idf_sys::*;
 
-use beacon::error::{Error, Result};
-use beacon::link::{NODE, PayloadLink};
-
-pub const OUTPUT_WIDTH: usize = sstv::Mode::Robot36.image_width() as usize;
-pub const OUTPUT_HEIGHT: usize = sstv::Mode::Robot36.image_height() as usize;
-
-
-/// Interface configuration for the Philips I2S standard at 16 kHz on the ESP32-P4.
-///
-/// MCLK = 256 × 16 000 Hz = 4.096 MHz. BCLK = MCLK / 8 = 512 kHz,
-/// which exactly satisfies the 16 kHz × 2 channels × 16 bits = 512 kHz requirement.
-pub const PHILLIPS_I2S: I2sConfig = I2sConfig {
-    sample_rate: 16_000,
-    clock_divider: 8,
-    mclk_pin: 20,
-    bclk_pin: 21,
-    dout_pin: 22,
-    ws_pin: 23,
-    chunk_size: 512,
+use super::esp::{
+    CsiConfig, CsiInterface, EspI2c, I2cConfig, ResetPin, SpiFrameConfig, SpiFrameInterface,
 };
+use super::sensors::{Mi48, Sc850sl};
+use crate::error::{Error, Result};
 
-pub fn initialize_audio_channel() -> Result<Pcm5102a<I2sInterface>> {
-    let interface = I2sInterface::new(&Pcm5102a::<I2sInterface>::ENCODER, &PHILLIPS_I2S)?;
-    Ok(Pcm5102a::new(
-        interface,
-        PHILLIPS_I2S.sample_rate,
-        PHILLIPS_I2S.chunk_size,
-    ))
-}
-
-// ── Payload link: CSP over KISS over RS422 (UART1) ───────────────────────────────
-
-pub const LINK_BAUD_RATE: u32 = 115_200;
-
-/// The mission's payload link over the ESP32-P4 UART RX transport.
-pub type Rs422Link = PayloadLink<UartRxDriver<'static>>;
-
-/// Bring up the RS422 UART (TX=GPIO38, RX=GPIO37, driver-enable=GPIO39) and
-/// the CSP node, and wrap them in the mission's [`PayloadLink`].
-pub fn initialize_payload_link(peripherals: Peripherals) -> Result<Rs422Link> {
-    let mut de = PinDriver::output(peripherals.pins.gpio39).map_err(|_| Error::Peripheral)?;
-    de.set_high().map_err(|_| Error::Peripheral)?;
-    // RS422 full-duplex: the TX driver-enable line is held high for the whole
-    // run. The firmware never exits, so leak the pin rather than parking it in
-    // the link — dropping the driver would reset the line and disable the
-    // transmitter.
-    core::mem::forget(de);
-
-    let driver = UartDriver::new(
-        peripherals.uart1,
-        peripherals.pins.gpio38,
-        peripherals.pins.gpio37,
-        Option::<AnyIOPin>::None,
-        Option::<AnyIOPin>::None,
-        &uart::config::Config::new()
-            .baudrate(Hertz(LINK_BAUD_RATE))
-            .rx_fifo_size(8192),
-    )
-    .map_err(|_| Error::UartAllocation)?;
-    let (uart_tx, uart_rx) = driver.into_split();
-
-    let csp = CspLink::try_new(
-        CspLinkConfig {
-            address: NODE,
-            hostname: "beacon",
-            model: "esp32p4",
-        },
-        uart_tx,
-        uart_rx,
-    )
-    .map_err(|_| Error::CspInit)?;
-
-    PayloadLink::try_new(csp)
-}
+/// SSTV output resolution both cameras render into.
+const OUTPUT_WIDTH: usize = sstv::Mode::Robot36.image_width() as usize;
+const OUTPUT_HEIGHT: usize = sstv::Mode::Robot36.image_height() as usize;
 
 const RGB_SDA_PIN: i32 = 11;
 const RGB_SCL_PIN: i32 = 9;
