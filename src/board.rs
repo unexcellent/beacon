@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use beacon::audio::{AudioChannel, AudioInterface, PCM5102A};
+use beacon::audio::{I2sConfig, I2sInterface, Pcm5102a};
 use beacon::camera::esp::{
     CsiConfig, CsiInterface, EspI2c, I2cConfig, ResetPin, SpiFrameConfig, SpiFrameInterface,
 };
@@ -29,7 +29,7 @@ pub const OUTPUT_HEIGHT: usize = sstv::Mode::Robot36.image_height() as usize;
 ///
 /// MCLK = 256 × 16 000 Hz = 4.096 MHz. BCLK = MCLK / 8 = 512 kHz,
 /// which exactly satisfies the 16 kHz × 2 channels × 16 bits = 512 kHz requirement.
-pub const PHILLIPS_I2S: AudioInterface = AudioInterface {
+pub const PHILLIPS_I2S: I2sConfig = I2sConfig {
     sample_rate: 16_000,
     clock_divider: 8,
     mclk_pin: 20,
@@ -39,8 +39,13 @@ pub const PHILLIPS_I2S: AudioInterface = AudioInterface {
     chunk_size: 512,
 };
 
-pub fn initialize_audio_channel() -> Result<AudioChannel> {
-    Ok(AudioChannel::try_new(PCM5102A, PHILLIPS_I2S)?)
+pub fn initialize_audio_channel() -> Result<Pcm5102a<I2sInterface>> {
+    let interface = I2sInterface::new(&Pcm5102a::<I2sInterface>::ENCODER, &PHILLIPS_I2S)?;
+    Ok(Pcm5102a::new(
+        interface,
+        PHILLIPS_I2S.sample_rate,
+        PHILLIPS_I2S.chunk_size,
+    ))
 }
 
 // ── Payload link: CSP over KISS over RS422 (UART1) ───────────────────────────────

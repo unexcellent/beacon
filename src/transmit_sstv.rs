@@ -1,4 +1,3 @@
-use crate::board::PHILLIPS_I2S;
 use crate::error::{Error, Result};
 use beacon::audio::AudioChannel;
 use beacon::camera::{Camera, Image, capture_image};
@@ -8,7 +7,7 @@ use sstv::{Encoder, Mode, Synthesizer};
 pub fn transmit_sstv(
     rgb: Option<&mut impl Camera>,
     thermal: Option<&mut impl Camera>,
-    audio: &mut AudioChannel,
+    audio: &mut impl AudioChannel,
 ) -> Result<()> {
     let rgb_image = capture_image(rgb);
     let thermal_image = capture_image(thermal);
@@ -30,11 +29,11 @@ fn sleep(seconds: u32) {
     delay::FreeRtos::delay_ms(seconds * 1_000);
 }
 
-fn transmit_image(image: Image, audio: &mut AudioChannel) -> Result<()> {
+fn transmit_image(image: Image, audio: &mut impl AudioChannel) -> Result<()> {
     log::info!("SSTV: encoding and transmitting...");
 
     let encoder = Encoder::new(Mode::Robot36, image).map_err(|_| Error::EmptyImage)?;
-    for sample in Synthesizer::new(encoder, PHILLIPS_I2S.sample_rate) {
+    for sample in Synthesizer::new(encoder, audio.sample_rate()) {
         audio.transmit(sample)?;
     }
     audio.flush()?;
