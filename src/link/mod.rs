@@ -21,7 +21,7 @@ pub use command::Command;
 pub use message::Message;
 pub use payload_link::PayloadLink;
 
-use crate::Result;
+use crate::error::Result;
 
 /// This node's CSP address on the payload bus.
 pub const NODE: u16 = 7;

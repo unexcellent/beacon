@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use crate::Error;
+use crate::error::Error;
 
 const PAYLOAD_NODE: u16 = 14;
 const PAYLOAD_PORT: u8 = 1;

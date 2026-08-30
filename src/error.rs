@@ -54,11 +54,11 @@ pub enum Error {
     UpdateWrite(u32, i32),
 }
 
-impl From<beacon::audio::AudioError> for Error {
-    fn from(e: beacon::audio::AudioError) -> Self {
+impl From<crate::audio::AudioError> for Error {
+    fn from(e: crate::audio::AudioError) -> Self {
         match e {
-            beacon::audio::AudioError::Init => Error::AudioInit,
-            beacon::audio::AudioError::Transmission => Error::AudioTransmission,
+            crate::audio::AudioError::Init => Error::AudioInit,
+            crate::audio::AudioError::Transmission => Error::AudioTransmission,
         }
     }
 }

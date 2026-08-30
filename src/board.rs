@@ -9,7 +9,7 @@ use beacon::camera::esp::{
     CsiConfig, CsiInterface, EspI2c, I2cConfig, ResetPin, SpiFrameConfig, SpiFrameInterface,
 };
 use beacon::camera::sensors::{Mi48, Sc850sl};
-use crate::link::csp::{CspLink, CspLinkConfig};
+use beacon::link::csp::{CspLink, CspLinkConfig};
 use esp_idf_hal::{
     gpio::{AnyIOPin, PinDriver},
     peripherals::Peripherals,
@@ -18,8 +18,8 @@ use esp_idf_hal::{
 };
 use esp_idf_sys::*;
 
-use crate::error::{Error, Result};
-use crate::link::{NODE, PayloadLink};
+use beacon::error::{Error, Result};
+use beacon::link::{NODE, PayloadLink};
 
 pub const OUTPUT_WIDTH: usize = sstv::Mode::Robot36.image_width() as usize;
 pub const OUTPUT_HEIGHT: usize = sstv::Mode::Robot36.image_height() as usize;

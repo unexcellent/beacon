@@ -7,7 +7,7 @@ use super::command::parse_update_packet;
 use super::csp::{CspLink, SerialRead};
 use super::kiss;
 use super::{Command, CommandLink, Message};
-use crate::{Error, Result};
+use crate::error::{Error, Result};
 
 const UPDATE_PORT: u8 = 10;
 const CMD_PORT: u8 = 11;
