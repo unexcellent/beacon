@@ -3,7 +3,7 @@ use beacon::camera::Camera;
 use beacon::camera::move_iiia::{initialize_rgb_camera, initialize_thermal_camera};
 use beacon::error::{Error, ReportIfErr, Result};
 use beacon::idle::idle;
-use beacon::link::move_iiia::{Rs422Link, initialize_payload_link as bring_up_payload_link};
+use beacon::link::move_iiia::initialize_payload_link as bring_up_payload_link;
 use beacon::link::{CommandLink, Message};
 
 use esp_idf_hal::peripherals::Peripherals;
@@ -30,7 +30,7 @@ fn initialize_esp32() {
     esp_idf_svc::log::EspLogger::initialize_default();
 }
 
-fn initialize_payload_link() -> Result<Rs422Link> {
+fn initialize_payload_link() -> Result<impl CommandLink> {
     let link = bring_up_payload_link(Peripherals::take().map_err(|_| Error::Peripheral)?)?;
 
     let description = unsafe { &*esp_idf_svc::sys::esp_app_get_description() };

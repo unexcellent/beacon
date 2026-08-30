@@ -5,7 +5,9 @@
 //!
 //! - [`Command`] — inbound commands from the bus, parsed in [`command`].
 //! - [`Message`] — outbound messages and their destinations, in [`message`].
-//! - [`PayloadLink`] — the CSP-node-backed [`CommandLink`], in [`payload_link`].
+//! - [`CommandLink`] — the role trait a link implements. The mission's
+//!   implementation is a private carrier detail in [`move_iiia`], exposed only
+//!   as `impl CommandLink`.
 //!
 //! Its lower layers live alongside it: the generic CSP node in [`csp`] and the
 //! KISS/CSP wire codec in [`kiss`].
@@ -15,7 +17,6 @@ mod kiss;
 
 mod command;
 mod message;
-mod payload_link;
 
 /// MOVE-IIIa carrier bring-up.
 #[path = "move-iiia.rs"]
@@ -23,7 +24,6 @@ pub mod move_iiia;
 
 pub use command::Command;
 pub use message::Message;
-pub use payload_link::PayloadLink;
 
 use crate::error::Result;
 
