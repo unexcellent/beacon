@@ -13,7 +13,7 @@ use beacon::csp::{CspLink, CspLinkConfig};
 use esp_idf_hal::{
     gpio::{AnyIOPin, PinDriver},
     peripherals::Peripherals,
-    uart::{self, UartDriver},
+    uart::{self, UartDriver, UartRxDriver},
     units::Hertz,
 };
 use esp_idf_sys::*;
@@ -52,11 +52,19 @@ pub fn initialize_audio_channel() -> Result<Pcm5102a<I2sInterface>> {
 
 pub const LINK_BAUD_RATE: u32 = 115_200;
 
+/// The mission's payload link over the ESP32-P4 UART RX transport.
+pub type Rs422Link = PayloadLink<UartRxDriver<'static>>;
+
 /// Bring up the RS422 UART (TX=GPIO38, RX=GPIO37, driver-enable=GPIO39) and
 /// the CSP node, and wrap them in the mission's [`PayloadLink`].
-pub fn initialize_payload_link(peripherals: Peripherals) -> Result<PayloadLink> {
+pub fn initialize_payload_link(peripherals: Peripherals) -> Result<Rs422Link> {
     let mut de = PinDriver::output(peripherals.pins.gpio39).map_err(|_| Error::Peripheral)?;
     de.set_high().map_err(|_| Error::Peripheral)?;
+    // RS422 full-duplex: the TX driver-enable line is held high for the whole
+    // run. The firmware never exits, so leak the pin rather than parking it in
+    // the link — dropping the driver would reset the line and disable the
+    // transmitter.
+    core::mem::forget(de);
 
     let driver = UartDriver::new(
         peripherals.uart1,
@@ -78,10 +86,11 @@ pub fn initialize_payload_link(peripherals: Peripherals) -> Result<PayloadLink> 
             model: "esp32p4",
         },
         uart_tx,
+        uart_rx,
     )
     .map_err(|_| Error::CspInit)?;
 
-    PayloadLink::try_new(csp, uart_rx, de)
+    PayloadLink::try_new(csp)
 }
 
 const RGB_SDA_PIN: i32 = 11;

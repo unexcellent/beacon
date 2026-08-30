@@ -1,6 +1,6 @@
 use core::fmt;
 
-use crate::link::{Message, PayloadLink};
+use crate::link::{CommandLink, Message};
 
 /// Crate-wide error type wrapping the errors of the underlying drivers.
 ///
@@ -79,11 +79,11 @@ pub type Result<T> = core::result::Result<T, Error>;
 /// Extension trait for downlinking failures via the payload link.
 pub trait ReportIfErr<T> {
     /// Log the error and send it via the payload link before passing it on.
-    fn report_if_err(self, link: &PayloadLink) -> Result<T>;
+    fn report_if_err<L: CommandLink>(self, link: &L) -> Result<T>;
 }
 
 impl<T> ReportIfErr<T> for Result<T> {
-    fn report_if_err(self, link: &PayloadLink) -> Result<T> {
+    fn report_if_err<L: CommandLink>(self, link: &L) -> Result<T> {
         if let Err(e) = &self {
             log::error!("{e}");
             link.send(Message::Error(e.clone()));

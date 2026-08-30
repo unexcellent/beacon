@@ -8,7 +8,7 @@ use esp_idf_sys::{
     esp_ota_handle_t, esp_ota_set_boot_partition, esp_ota_write, esp_partition_t, esp_restart,
 };
 
-use crate::link::{Command, PayloadLink};
+use crate::link::{Command, CommandLink};
 use crate::error::{Error, Result};
 
 const OTA_WITH_SEQUENTIAL_WRITES: usize = 0xFFFFFFFE;
@@ -16,8 +16,8 @@ const OTA_WITH_SEQUENTIAL_WRITES: usize = 0xFFFFFFFE;
 /// Run one firmware update session after its announcement. Keeps polling the
 /// link until the transfer completes (which reboots into the new firmware) or
 /// fails. SSTV commands received in the meantime are ignored; ping stays alive
-/// since it is serviced inside [`PayloadLink::poll`].
-pub fn update(chunk_size: u16, link: &mut PayloadLink) -> Result<()> {
+/// since it is serviced inside [`CommandLink::receive`].
+pub fn update<L: CommandLink>(chunk_size: u16, link: &mut L) -> Result<()> {
     let mut state = UpdateState::Announced;
 
     loop {

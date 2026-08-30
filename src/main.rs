@@ -4,9 +4,9 @@ mod link;
 mod transmit_sstv;
 mod update;
 
-use board::{initialize_audio_channel, initialize_rgb_camera, initialize_thermal_camera};
+use board::{Rs422Link, initialize_audio_channel, initialize_rgb_camera, initialize_thermal_camera};
 use error::{Error, ReportIfErr, Result};
-use link::{Command, Message, PayloadLink};
+use link::{Command, CommandLink, Message};
 use transmit_sstv::transmit_sstv;
 use update::update;
 
@@ -44,7 +44,7 @@ fn initialize_esp32() -> Result<Peripherals> {
     Peripherals::take().map_err(|_| Error::Peripheral)
 }
 
-fn initialize_payload_link(peripherals: Peripherals) -> Result<PayloadLink> {
+fn initialize_payload_link(peripherals: Peripherals) -> Result<Rs422Link> {
     let link = board::initialize_payload_link(peripherals)?;
 
     let description = unsafe { &*esp_idf_svc::sys::esp_app_get_description() };

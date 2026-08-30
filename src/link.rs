@@ -1,18 +1,12 @@
 //! The mission protocol spoken over the CSP payload link: the network map
-//! (which node/port carries what), the message and command formats, and the
-//! RX pump with its error policy. The generic CSP-over-KISS engine lives in
-//! [`beacon::csp`](beacon::csp).
-
-use esp_idf_hal::{
-    delay,
-    gpio::{Output, PinDriver},
-    uart::UartRxDriver,
-};
+//! (which node/port carries what) and the message and command formats. The
+//! generic CSP-over-KISS engine — including the RX pump and its error policy —
+//! lives in [`beacon::csp`](beacon::csp); this is the mission application on top.
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
 
-use beacon::csp::CspLink;
+use beacon::csp::{CspLink, SerialRead};
 use beacon::kiss;
 
 use crate::{Error, Result};
@@ -26,11 +20,6 @@ const OBC_NODE: u16 = 1;
 const OBC_PORT: u8 = 1;
 const UHF_GROUND_NODE: u16 = 2;
 const UHF_GROUND_PORT: u8 = 1;
-
-/// Consecutive UART read failures tolerated before [`PayloadLink::receive`]
-/// reports an [`Error::UartReceive`]. With the 100 ms retry pacing this means
-/// one report per second of persistent failure.
-const MAX_RX_ERRORS: u32 = 10;
 
 // OTA wire protocol: first payload byte selects the command, the rest is
 // little-endian command data.
@@ -98,124 +87,42 @@ impl Message {
     }
 }
 
-pub struct PayloadLink {
-    csp: CspLink,
-    rx: UartRxDriver<'static>,
-    ota_sock: libcsp::Socket,
-    cmd_sock: libcsp::Socket,
-    decoder: kiss::KissDecoder,
-    /// Commands already received but not yet handed out by [`Self::receive`].
-    commands: VecDeque<Command>,
-    /// Consecutive UART read failures, reset by every successful read.
-    rx_errors: u32,
-    /// RS422 full-duplex: the TX driver-enable pin is held high for the lifetime
-    /// of the link. Kept as a field so it is not dropped (which would reset the
-    /// pin and disable the transmitter).
-    _de: PinDriver<'static, Output>,
+/// The mission's view of the payload link: transmit [`Message`]s and poll for
+/// inbound [`Command`]s. [`PayloadLink`] is the hardware-backed implementation;
+/// depending on the trait lets the OTA and error-reporting logic run against a
+/// stand-in link off-target.
+pub trait CommandLink {
+    /// Transmit a message via the link.
+    fn send(&self, message: Message);
+
+    /// Return the next pending command, or None if none is currently available.
+    /// When nothing is buffered this pumps the link once, waiting up to the read
+    /// timeout for traffic, so it is meant to be called in a `while let
+    /// Some(cmd)` loop rather than a `for` loop.
+    fn receive(&mut self) -> Result<Option<Command>>;
 }
 
-impl PayloadLink {
-    /// Wrap the brought-up CSP node and RX half with the OTA / command
-    /// service sockets. Hardware construction lives in the board module.
-    pub fn try_new(
-        csp: CspLink,
-        rx: UartRxDriver<'static>,
-        de: PinDriver<'static, Output>,
-    ) -> Result<Self> {
+pub struct PayloadLink<R> {
+    csp: CspLink<R>,
+    ota_sock: libcsp::Socket,
+    cmd_sock: libcsp::Socket,
+    /// Commands already received but not yet handed out by [`Self::receive`].
+    commands: VecDeque<Command>,
+}
+
+impl<R: SerialRead> PayloadLink<R> {
+    /// Bind the OTA / command service sockets on the brought-up CSP node. The
+    /// node owns the serial transport and is pumped via its `poll`.
+    pub fn try_new(csp: CspLink<R>) -> Result<Self> {
         let ota_sock = csp.bind(OTA_PORT).map_err(|_| Error::CspInit)?;
         let cmd_sock = csp.bind(CMD_PORT).map_err(|_| Error::CspInit)?;
 
         Ok(Self {
             csp,
-            rx,
             ota_sock,
             cmd_sock,
-            decoder: kiss::KissDecoder::new(),
             commands: VecDeque::new(),
-            rx_errors: 0,
-            _de: de,
         })
-    }
-
-    /// Transmit a message via the payload link. It is KISS-encoded and written
-    /// to the UART before this returns.
-    pub fn send(&self, message: Message) {
-        log::info!(
-            "Sending '{}' to {}:{}",
-            String::from_utf8_lossy(&message.payload()),
-            message.node(),
-            message.port()
-        );
-        self.csp.send(
-            message.node(),
-            message.port(),
-            libcsp::Priority::Norm,
-            &message.payload(),
-        );
-    }
-
-    /// Return the next command received from the payload board, or None if
-    /// currently none is pending. When the internal queue is empty this pumps
-    /// the link once (UART bytes through KISS into CSP, router, ping service),
-    /// waiting up to the UART read timeout for traffic — so it is intended to
-    /// be called in a `while let Some(cmd)` loop, not a `for` loop.
-    pub fn receive(&mut self) -> Result<Option<Command>> {
-        if let Some(cmd) = self.commands.pop_front() {
-            return Ok(Some(cmd));
-        }
-        self.pump_rx()?;
-        self.collect_commands();
-        Ok(self.commands.pop_front())
-    }
-
-    /// Feed received UART bytes through the KISS decoder and inject every
-    /// complete CSP packet into the node. Fails with [`Error::UartReceive`]
-    /// when the UART read itself errors.
-    fn pump_rx(&mut self) -> Result<()> {
-        let mut buf = [0u8; 512];
-
-        let read_timeout = delay::TickType::new_millis(100).ticks();
-        let Ok(n) = self.rx.read(&mut buf, read_timeout) else {
-            self.rx_errors += 1;
-
-            delay::FreeRtos::delay_ms(100);
-            if self.rx_errors >= MAX_RX_ERRORS {
-                self.rx_errors = 0;
-                return Err(Error::UartReceive);
-            }
-            return Ok(());
-        };
-        self.rx_errors = 0;
-        for &b in &buf[..n] {
-            let Some(frame) = self.decoder.push(b) else {
-                continue;
-            };
-            if let Some(pkt) = kiss::decode_packet(&frame) {
-                self.log_rx_packet(&pkt);
-                self.csp.inject(pkt);
-            }
-        }
-        Ok(())
-    }
-
-    /// Log one received packet, except OTA data chunks (hundreds of them during a
-    /// firmware transfer would flood the console).
-    fn log_rx_packet(&self, pkt: &libcsp::Packet) {
-        let id = pkt.id();
-        if id.dport == OTA_PORT && pkt.data().first() == Some(&OTA_CMD_DATA) {
-            return;
-        }
-        let (src, sport, dst, dport, flags) = (id.src, id.sport, id.dst, id.dport, id.flags);
-        log::info!(
-            "[UART RX] from {}:{} to {}:{} is {} (flags 0x{:02x}, len={})",
-            src,
-            sport,
-            dst,
-            dport,
-            kiss::fmt_payload(pkt.data()),
-            flags,
-            pkt.data().len()
-        );
     }
 
     /// Drain the OTA and command sockets into the internal command queue.
@@ -237,6 +144,35 @@ impl PayloadLink {
                 }
             }
         }
+    }
+}
+
+impl<R: SerialRead> CommandLink for PayloadLink<R> {
+    /// KISS-encodes the message and writes it to the serial link before returning.
+    fn send(&self, message: Message) {
+        log::info!(
+            "Sending '{}' to {}:{}",
+            String::from_utf8_lossy(&message.payload()),
+            message.node(),
+            message.port()
+        );
+        self.csp.send(
+            message.node(),
+            message.port(),
+            libcsp::Priority::Norm,
+            &message.payload(),
+        );
+    }
+
+    /// Pumps the CSP node once, then drains the service sockets into the
+    /// command queue.
+    fn receive(&mut self) -> Result<Option<Command>> {
+        if let Some(cmd) = self.commands.pop_front() {
+            return Ok(Some(cmd));
+        }
+        self.csp.poll().map_err(|_| Error::UartReceive)?;
+        self.collect_commands();
+        Ok(self.commands.pop_front())
     }
 }
 
