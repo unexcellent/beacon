@@ -15,3 +15,6 @@ pub mod link;
 pub mod transmit_sstv;
 #[cfg(target_os = "espidf")]
 pub mod update;
+
+#[cfg(test)]
+mod test_support;

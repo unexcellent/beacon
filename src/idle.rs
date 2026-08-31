@@ -42,3 +42,51 @@ pub fn idle<L: CommandLink>(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use super::idle;
+    use crate::camera::Camera;
+    use crate::error::{Error, Result};
+    use crate::link::Command;
+    use crate::test_support::{FakeAudio, ScriptedLink, ok};
+
+    /// Drive `idle` (which never returns) until the scripted link is exhausted
+    /// and panics the loop, then hand back the link for message inspection.
+    /// Uses no cameras so the SSTV path is a fast no-op and only the command
+    /// dispatch is under test.
+    fn run_idle(script: Vec<Result<Option<Command>>>) -> ScriptedLink {
+        let mut link = ScriptedLink::new(script);
+        let mut audio = FakeAudio::new();
+        let cameras: Vec<Option<Box<dyn Camera>>> = Vec::new();
+
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            idle(&mut link, cameras, &mut audio);
+        }));
+        assert!(
+            outcome.is_err(),
+            "idle should only end via the sentinel panic"
+        );
+        link
+    }
+
+    #[test]
+    fn sstv_command_is_bracketed_by_busy_and_available() {
+        let link = run_idle(vec![ok(Command::Sstv)]);
+        assert_eq!(link.sent_kinds(), ["BUSY", "AVAILABLE"]);
+    }
+
+    #[test]
+    fn link_error_is_reported_and_loop_continues() {
+        let link = run_idle(vec![Err(Error::UartReceive), ok(Command::Sstv)]);
+        assert_eq!(link.sent_kinds(), ["ERROR", "BUSY", "AVAILABLE"]);
+    }
+
+    #[test]
+    fn idle_poll_sends_nothing() {
+        let link = run_idle(vec![Ok(None)]);
+        assert!(link.sent_kinds().is_empty());
+    }
+}

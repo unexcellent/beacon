@@ -60,3 +60,69 @@ fn transmit_image(image: Image, audio: &mut impl AudioChannel) -> Result<()> {
     log::info!("SSTV: transmission complete");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::transmit_sstv;
+    use crate::camera::Camera;
+    use crate::test_support::{FakeAudio, FakeCamera};
+
+    #[test]
+    fn single_camera_captures_then_encodes_and_flushes_once() {
+        let (cam, log) = FakeCamera::new();
+        let mut cameras: Vec<Option<Box<dyn Camera>>> = vec![Some(cam)];
+        let mut audio = FakeAudio::new();
+
+        transmit_sstv(&mut cameras, &mut audio).expect("transmission");
+
+        assert_eq!(*log.borrow(), ["on", "cal", "recv", "off"]);
+        assert_eq!(audio.flushes, 1);
+        assert!(audio.samples > 0, "encoder should produce samples");
+    }
+
+    #[test]
+    fn empty_slots_are_skipped() {
+        let (cam, _log) = FakeCamera::new();
+        let mut cameras: Vec<Option<Box<dyn Camera>>> = vec![None, Some(cam), None];
+        let mut audio = FakeAudio::new();
+
+        transmit_sstv(&mut cameras, &mut audio).expect("transmission");
+
+        assert_eq!(audio.flushes, 1, "only the present camera transmits");
+    }
+
+    #[test]
+    fn every_present_camera_transmits() {
+        let (a, _la) = FakeCamera::new();
+        let (b, _lb) = FakeCamera::new();
+        let mut cameras: Vec<Option<Box<dyn Camera>>> = vec![Some(a), Some(b)];
+        let mut audio = FakeAudio::new();
+
+        transmit_sstv(&mut cameras, &mut audio).expect("transmission");
+
+        assert_eq!(audio.flushes, 2);
+    }
+
+    #[test]
+    fn no_cameras_transmit_nothing() {
+        let mut cameras: Vec<Option<Box<dyn Camera>>> = Vec::new();
+        let mut audio = FakeAudio::new();
+
+        transmit_sstv(&mut cameras, &mut audio).expect("no-op");
+
+        assert_eq!(audio.samples, 0);
+        assert_eq!(audio.flushes, 0);
+    }
+
+    #[test]
+    fn audio_error_propagates_and_skips_flush() {
+        let (cam, _log) = FakeCamera::new();
+        let mut cameras: Vec<Option<Box<dyn Camera>>> = vec![Some(cam)];
+        let mut audio = FakeAudio::failing_after(100);
+
+        let result = transmit_sstv(&mut cameras, &mut audio);
+
+        assert!(result.is_err());
+        assert_eq!(audio.flushes, 0, "a failed transmit must not reach flush");
+    }
+}
