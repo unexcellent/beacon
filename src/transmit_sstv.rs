@@ -4,7 +4,6 @@
 use crate::audio::AudioChannel;
 use crate::camera::{Camera, Image, capture_image};
 use crate::error::{Error, Result};
-use esp_idf_hal::delay;
 use sstv::{Encoder, Mode, Synthesizer};
 
 /// Capture and transmit one SSTV image for each working camera.
@@ -44,7 +43,8 @@ fn capture_images(cameras: &mut [Option<Box<dyn Camera>>]) -> Vec<Image> {
 /// Block the current task for `seconds`, spacing consecutive transmissions.
 fn wait(seconds: u32) {
     log::info!("Waiting {} seconds...", seconds);
-    delay::FreeRtos::delay_ms(seconds * 1_000);
+    #[cfg(target_os = "espidf")]
+    esp_idf_hal::delay::FreeRtos::delay_ms(seconds * 1_000);
 }
 
 /// Robot36-encode one image and stream its samples through the audio channel.

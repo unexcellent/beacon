@@ -7,6 +7,7 @@ use crate::camera::Camera;
 use crate::error::ReportIfErr;
 use crate::link::{Command, CommandLink, Message};
 use crate::transmit_sstv::transmit_sstv;
+#[cfg(target_os = "espidf")]
 use crate::update::update;
 
 /// Run the beacon's main loop: block on `link` and service each command.
@@ -33,6 +34,7 @@ pub fn idle<L: CommandLink>(
                 let _ = transmit_sstv(&mut cameras, audio).report_if_err(&*link);
                 link.send(Message::Available);
             }
+            #[cfg(target_os = "espidf")]
             Ok(Some(Command::UpdateAnnounced(chunk_size))) => {
                 let _ = update(chunk_size, link).report_if_err(&*link);
             }

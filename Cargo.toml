@@ -30,14 +30,20 @@ esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git" }
 [dependencies]
 embedded-hal = "1"
 log = "0.4"
+sstv = { version = "0.1", default-features = false }
+
+# Platform crates. Gated on the ESP-IDF target so the library still builds for
+# the host, where the trait-driven logic (idle/transmit_sstv/update) is tested.
+[target.'cfg(target_os = "espidf")'.dependencies]
 esp-idf-sys = "0.37"
 esp-idf-hal = "0.46"
 esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
-sstv = { version = "0.1", default-features = false }
 libcsp = { git = "https://github.com/xarantolus/libcsp_rust", rev = "16ba62b127ba431aa03516a1322592d257d37789", default-features = false, features = ["external-arch"] }
 
 [build-dependencies]
-embuild = "0.33"
+# `espidf` feature enabled unconditionally so `embuild::espidf` resolves on the
+# host build too; build.rs only calls into it for the ESP-IDF target.
+embuild = { version = "0.33", features = ["espidf"] }
 
 [package.metadata.esp-idf-sys]
 extra_components = [

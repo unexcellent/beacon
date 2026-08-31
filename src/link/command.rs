@@ -1,5 +1,9 @@
 //! Inbound commands from the payload bus and the update wire-format parsing.
 
+// `parse_update_packet` is reached only from the ESP-only link collector; on the
+// host it is compiled for tests to target, so silence dead-code there.
+#![cfg_attr(not(target_os = "espidf"), allow(dead_code))]
+
 // update wire protocol: first payload byte selects the command, the rest is
 // little-endian command data.
 const UPDATE_CMD_ANNOUNCE: u8 = 0x00;

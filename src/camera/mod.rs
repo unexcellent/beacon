@@ -9,6 +9,7 @@
 //! platform boundary the sensors depend on.
 
 mod auto_exposure;
+#[cfg(target_os = "espidf")]
 pub mod esp;
 mod format;
 mod image;
@@ -16,6 +17,7 @@ pub mod interface;
 pub mod sensors;
 
 /// MOVE-IIIa carrier bring-up.
+#[cfg(target_os = "espidf")]
 #[path = "move-iiia.rs"]
 pub mod move_iiia;
 

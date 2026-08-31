@@ -12,6 +12,7 @@
 //! Its lower layers live alongside it: the generic CSP node in [`csp`] and the
 //! KISS/CSP wire codec in [`kiss`].
 
+#[cfg(target_os = "espidf")]
 pub mod csp;
 mod kiss;
 
@@ -19,6 +20,7 @@ mod command;
 mod message;
 
 /// MOVE-IIIa carrier bring-up.
+#[cfg(target_os = "espidf")]
 #[path = "move-iiia.rs"]
 pub mod move_iiia;
 

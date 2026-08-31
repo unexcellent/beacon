@@ -1,10 +1,16 @@
 //! KISS framing codec and CSP packet (de)serialization for serial links.
 
+// On the host build the packet (de)serialization below is gated out (it needs
+// libcsp) and the pure codec is reached only from tests, so silence dead-code
+// there rather than gating the whole module out of host reach.
+#![cfg_attr(not(target_os = "espidf"), allow(dead_code))]
+
 const FEND: u8 = 0xC0;
 const FESC: u8 = 0xDB;
 const TFEND: u8 = 0xDC;
 const TFESC: u8 = 0xDD;
 
+#[cfg(target_os = "espidf")]
 const CSP_FLAG_CRC32: u8 = 0x10;
 
 pub fn kiss_encode(data: &[u8]) -> Vec<u8> {
@@ -119,6 +125,7 @@ pub fn fmt_payload(bytes: &[u8]) -> String {
 }
 
 /// Serialize a CSP packet (big-endian header word + payload) for KISS transport.
+#[cfg(target_os = "espidf")]
 pub fn encode_packet(packet: &libcsp::Packet) -> Vec<u8> {
     let id = packet.id();
     let word: u32 = ((id.pri as u32) << 30)
@@ -133,6 +140,7 @@ pub fn encode_packet(packet: &libcsp::Packet) -> Vec<u8> {
 }
 
 /// Decode a KISS payload into a CSP Packet, or None if it is too short.
+#[cfg(target_os = "espidf")]
 pub fn decode_packet(frame: &[u8]) -> Option<libcsp::Packet> {
     if frame.len() < 4 {
         return None;

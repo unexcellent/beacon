@@ -13,4 +13,5 @@ pub mod error;
 pub mod idle;
 pub mod link;
 pub mod transmit_sstv;
+#[cfg(target_os = "espidf")]
 pub mod update;

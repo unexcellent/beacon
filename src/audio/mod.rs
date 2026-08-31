@@ -8,15 +8,18 @@
 //! platform code lives there, so the DAC driver itself is platform-agnostic.
 
 mod encoder;
+#[cfg(target_os = "espidf")]
 mod i2s;
 mod interface;
 mod pcm5102a;
 
 /// MOVE-IIIa carrier bring-up.
+#[cfg(target_os = "espidf")]
 #[path = "move-iiia.rs"]
 pub mod move_iiia;
 
 pub use encoder::AudioEncoder;
+#[cfg(target_os = "espidf")]
 pub use i2s::{I2sConfig, I2sInterface};
 pub use interface::AudioInterface;
 pub use pcm5102a::Pcm5102a;
