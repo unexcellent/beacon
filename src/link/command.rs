@@ -44,7 +44,10 @@ pub(super) fn parse_update_packet(payload: &[u8]) -> Option<Command> {
                 b[0], b[1], b[2], b[3],
             ]))),
             None => {
-                log::error!("update BEGIN: payload too short ({} bytes)", payload.len() - 1);
+                log::error!(
+                    "update BEGIN: payload too short ({} bytes)",
+                    payload.len() - 1
+                );
                 None
             }
         },
@@ -54,7 +57,10 @@ pub(super) fn parse_update_packet(payload: &[u8]) -> Option<Command> {
                 data: payload[5..].to_vec(),
             }),
             _ => {
-                log::error!("update DATA: payload too short ({} bytes)", payload.len() - 1);
+                log::error!(
+                    "update DATA: payload too short ({} bytes)",
+                    payload.len() - 1
+                );
                 None
             }
         },

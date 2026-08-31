@@ -350,7 +350,16 @@ fn build_image(
         }
         for dx in 0..out_w {
             let (ar, ag, ab) = unsafe {
-                sample_bayer_region(src, format.width, format.height, row_bytes, order, dx, dy, output)
+                sample_bayer_region(
+                    src,
+                    format.width,
+                    format.height,
+                    row_bytes,
+                    order,
+                    dx,
+                    dy,
+                    output,
+                )
             };
             let lr = ((ar - bl) * bl_scale).max(0.0);
             let lg = ((ag - bl) * bl_scale).max(0.0);
@@ -507,9 +516,9 @@ unsafe fn sample_bayer_region(
     }
 
     (
-        if cr > 0 { (sr / cr) as f32 } else { 0.0 },
-        if cg > 0 { (sg / cg) as f32 } else { 0.0 },
-        if cb > 0 { (sb / cb) as f32 } else { 0.0 },
+        sr.checked_div(cr).map_or(0.0, |v| v as f32),
+        sg.checked_div(cg).map_or(0.0, |v| v as f32),
+        sb.checked_div(cb).map_or(0.0, |v| v as f32),
     )
 }
 

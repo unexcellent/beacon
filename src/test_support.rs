@@ -25,7 +25,7 @@ pub(crate) struct FakeCamera {
 
 impl FakeCamera {
     /// Returns the boxed camera and a handle to its call log.
-    pub(crate) fn new() -> (Box<dyn Camera>, Rc<RefCell<Vec<&'static str>>>) {
+    pub(crate) fn boxed() -> (Box<dyn Camera>, Rc<RefCell<Vec<&'static str>>>) {
         let log = Rc::new(RefCell::new(Vec::new()));
         (Box::new(Self { log: log.clone() }), log)
     }

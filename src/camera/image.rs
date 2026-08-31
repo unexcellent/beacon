@@ -16,8 +16,17 @@ pub struct Image {
 impl Image {
     /// Wrap an already-built, row-major `width`x`height` pixel buffer.
     pub fn from_pixels(width: usize, height: usize, pixels: Vec<RgbPixel>) -> Self {
-        debug_assert_eq!(pixels.len(), width * height, "pixel count must match dimensions");
-        Self { pixels, index: 0, width, height }
+        debug_assert_eq!(
+            pixels.len(),
+            width * height,
+            "pixel count must match dimensions"
+        );
+        Self {
+            pixels,
+            index: 0,
+            width,
+            height,
+        }
     }
 
     pub fn width(&self) -> usize {

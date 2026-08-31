@@ -8,8 +8,8 @@ use esp_idf_sys::{
     esp_ota_handle_t, esp_ota_set_boot_partition, esp_ota_write, esp_partition_t, esp_restart,
 };
 
-use crate::link::{Command, CommandLink};
 use crate::error::{Error, Result};
+use crate::link::{Command, CommandLink};
 
 /// ESP-IDF's `OTA_WITH_SEQUENTIAL_WRITES` sentinel for `esp_ota_begin`: image
 /// size unknown, written sequentially.

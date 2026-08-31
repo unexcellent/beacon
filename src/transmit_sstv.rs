@@ -69,7 +69,7 @@ mod tests {
 
     #[test]
     fn single_camera_captures_then_encodes_and_flushes_once() {
-        let (cam, log) = FakeCamera::new();
+        let (cam, log) = FakeCamera::boxed();
         let mut cameras: Vec<Option<Box<dyn Camera>>> = vec![Some(cam)];
         let mut audio = FakeAudio::new();
 
@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn empty_slots_are_skipped() {
-        let (cam, _log) = FakeCamera::new();
+        let (cam, _log) = FakeCamera::boxed();
         let mut cameras: Vec<Option<Box<dyn Camera>>> = vec![None, Some(cam), None];
         let mut audio = FakeAudio::new();
 
@@ -93,8 +93,8 @@ mod tests {
 
     #[test]
     fn every_present_camera_transmits() {
-        let (a, _la) = FakeCamera::new();
-        let (b, _lb) = FakeCamera::new();
+        let (a, _la) = FakeCamera::boxed();
+        let (b, _lb) = FakeCamera::boxed();
         let mut cameras: Vec<Option<Box<dyn Camera>>> = vec![Some(a), Some(b)];
         let mut audio = FakeAudio::new();
 
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn audio_error_propagates_and_skips_flush() {
-        let (cam, _log) = FakeCamera::new();
+        let (cam, _log) = FakeCamera::boxed();
         let mut cameras: Vec<Option<Box<dyn Camera>>> = vec![Some(cam)];
         let mut audio = FakeAudio::failing_after(100);
 

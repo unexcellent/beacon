@@ -113,7 +113,9 @@ impl<I: CameraInterface> Mi48<I> {
 
     fn read_reg(&mut self, reg: u8) -> Result<u8, <I::Bus as ErrorType>::Error> {
         let mut val = [0u8];
-        self.interface.bus().write_read(self.address, &[reg], &mut val)?;
+        self.interface
+            .bus()
+            .write_read(self.address, &[reg], &mut val)?;
         Ok(val[0])
     }
 
@@ -204,7 +206,10 @@ impl<I: CameraInterface> Mi48<I> {
     /// Trigger exactly one single-shot frame, header stripped (NO_HEADER) →
     /// pure pixel data in the output frame buffer once ready.
     fn trigger(&mut self) -> Result<(), <I::Bus as ErrorType>::Error> {
-        self.write_reg(REG_FRAME_MODE, FRAME_MODE_SINGLE_FRAME | FRAME_MODE_NO_HEADER)
+        self.write_reg(
+            REG_FRAME_MODE,
+            FRAME_MODE_SINGLE_FRAME | FRAME_MODE_NO_HEADER,
+        )
     }
 
     /// Whether a triggered frame has finished and is ready to read out.

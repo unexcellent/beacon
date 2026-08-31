@@ -29,7 +29,11 @@ impl embedded_hal::i2c::Error for I2cError {
 }
 
 pub(super) fn check(err: esp_err_t) -> Result<(), I2cError> {
-    if err == ESP_OK { Ok(()) } else { Err(I2cError(err)) }
+    if err == ESP_OK {
+        Ok(())
+    } else {
+        Err(I2cError(err))
+    }
 }
 
 pub struct I2cConfig {

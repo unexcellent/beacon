@@ -53,6 +53,9 @@ impl SerialWrite for esp_idf_hal::uart::UartTxDriver<'_> {
 /// to the transport's read timeout. Returns the count read, or `Err` when the
 /// read itself fails (distinct from a timeout with no bytes, which is `Ok(0)`).
 pub trait SerialRead {
+    // The error carries no detail: callers only distinguish a hard read failure
+    // from a timeout-with-no-bytes (`Ok(0)`), so a unit error is deliberate.
+    #[allow(clippy::result_unit_err)]
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, ()>;
 }
 
@@ -85,7 +88,8 @@ impl<W: SerialWrite + Send> libcsp::CspInterface for KissSerialInterface<W> {
             kiss::fmt_payload(packet.data()),
             flags
         );
-        self.tx.write_all(&kiss::kiss_encode(&kiss::encode_packet(&packet)));
+        self.tx
+            .write_all(&kiss::kiss_encode(&kiss::encode_packet(&packet)));
     }
 
     fn name(&self) -> &str {
