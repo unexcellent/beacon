@@ -172,21 +172,23 @@ impl<I: CameraInterface> Mi48<I> {
         std::thread::sleep(Duration::from_millis(60));
     }
 
-    /// Bring-up diagnostics and configuration. Deliberately infallible in the
-    /// same way as the reference driver: an unresponsive chip is logged (every
-    /// later capture then times out cleanly) rather than failing bring-up.
+    /// Probe and configure the chip. Fails if the MI48Dx does not answer over
+    /// I²C, so bring-up can drop the thermal camera and downlink the failure
+    /// rather than silently capturing blank frames every SSTV. A present chip
+    /// ACKs its STATUS read even while still booting, so a NACK here means the
+    /// sensor is absent or miswired.
     pub fn init(&mut self) -> Result<(), <I::Bus as ErrorType>::Error> {
-        match self.read_reg(REG_STATUS) {
-            Ok(s) => log::info!(
-                "MI48: I²C link OK at 0x{:02x} (STATUS=0x{s:02x})",
-                self.address
-            ),
-            Err(e) => log::error!(
+        let status = self.read_reg(REG_STATUS).inspect_err(|e| {
+            log::error!(
                 "MI48: no response at 0x{:02x} ({e:?}). Check the ADDR strap (0x40/0x41), \
                  SDA/SCL wiring, and external pull-ups.",
                 self.address
-            ),
-        }
+            );
+        })?;
+        log::info!(
+            "MI48: I²C link OK at 0x{:02x} (STATUS=0x{status:02x})",
+            self.address
+        );
         self.wait_for_boot();
         self.log_identity();
         self.configure_filters();
