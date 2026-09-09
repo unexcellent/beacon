@@ -33,12 +33,28 @@ fn initialize_esp32() {
 fn initialize_payload_link() -> Result<impl CommandLink> {
     let link = bring_up_payload_link(Peripherals::take().map_err(|_| Error::Peripheral)?)?;
 
-    let description = unsafe { &*esp_idf_svc::sys::esp_app_get_description() };
-    let version =
-        unsafe { std::ffi::CStr::from_ptr(description.version.as_ptr()) }.to_string_lossy();
-    link.send(Message::Booted(format!("{version}")));
+    report_successful_boot(&link);
 
     Ok(link)
+}
+
+fn report_successful_boot(link: &impl CommandLink) {
+    let description = unsafe { &*esp_idf_svc::sys::esp_app_get_description() };
+
+    let version =
+        unsafe { std::ffi::CStr::from_ptr(description.version.as_ptr()) }.to_string_lossy();
+
+    let elf_sha: String = description
+        .app_elf_sha256
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+
+    let running = unsafe { &*esp_idf_svc::sys::esp_ota_get_running_partition() };
+
+    let partition = unsafe { std::ffi::CStr::from_ptr(running.label.as_ptr()) }.to_string_lossy();
+
+    link.send(Message::Booted(format!("{version} {elf_sha} {partition}")));
 }
 
 /// Erase a camera's concrete type so different cameras share one collection.

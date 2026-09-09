@@ -15,7 +15,8 @@ const UHF_GROUND_PORT: u8 = 1;
 pub enum Message {
     /// Message for payload board announcing idle state.
     Available,
-    /// Boot announcement carrying the firmware identity for ground validation.
+    /// Boot announcement carrying the firmware identity (version, ELF SHA256,
+    /// and running OTA partition) for ground validation.
     Booted(String),
     /// Message for payload board announcing exit of idle state.
     Busy,
