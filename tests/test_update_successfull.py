@@ -47,7 +47,6 @@ Env overrides (skip/redirect the build):
 from __future__ import annotations
 
 import argparse
-import glob
 import logging
 import os
 import subprocess
@@ -57,6 +56,13 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from tests.util.ota_hil import (  # noqa: E402
+    SKIP_EXIT,
+    Skipped,
+    detect_port_or_skip,
+    setup_logging,
+    wait_reachable,
+)
 from tests.util.payload_board import MockPayloadBoard  # noqa: E402
 
 log = logging.getLogger("ota_test")
@@ -150,17 +156,6 @@ def transmit_update(board: MockPayloadBoard, image: bytes, chunk: int, delay: fl
     log.info("END sent; awaiting reboot")
 
 
-def wait_reachable(board: MockPayloadBoard, timeout: float = 12.0) -> bool:
-    """Ping until the ESP answers or `timeout` elapses. After a (re)boot the ESP
-    spends a few seconds in camera init before it reaches idle() and services the
-    link, so a single short ping is not enough."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if board.ping(timeout=1.0):
-            return True
-    return False
-
-
 def _abort_on_update_error(board: MockPayloadBoard) -> None:
     """Drain pending frames; raise if the ESP downlinked an OTA error. Boot-time
     camera errors (RgbInit/ThermalInit) are ignored — only `Update*` counts."""
@@ -218,6 +213,7 @@ def run_ota_update(port: str | None = None, chunk: int = DEFAULT_CHUNK, delay: f
     when the image is byte-identical to what was there before (same SHA256),
     which a hash check alone cannot establish.
     """
+    port = port or detect_port_or_skip()  # skip (before the slow build) if no adapter
     image = build_ota_image()
     expected_sha = image_elf_sha256(image)
     log.info("transmitted image ELF SHA256: %s", expected_sha)
@@ -244,28 +240,10 @@ def run_ota_update(port: str | None = None, chunk: int = DEFAULT_CHUNK, delay: f
         return booted2
 
 
-def _detect_port_or_skip():
-    ports = sorted(glob.glob("/dev/cu.usbserial-*")) or sorted(glob.glob("/dev/ttyUSB*"))
-    if not ports:
-        try:
-            import pytest
-
-            pytest.skip("no RS422 adapter detected — HIL test requires the payload link")
-        except ImportError:
-            raise SystemExit("no RS422 adapter detected")
-    return ports[0]
-
-
-def _setup_logging() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s.%(msecs)03d %(message)s", datefmt="%H:%M:%S")
-    # The board logs every TX/RX frame; at ~3400 chunks that buries the output.
-    logging.getLogger("payload_board").setLevel(logging.WARNING)
-
-
 def test_update_successful():
     """pytest entry point: OTA the firmware and assert the ESP reboots into it."""
-    _setup_logging()
-    port = _detect_port_or_skip()
+    setup_logging()
+    port = detect_port_or_skip()
     booted = run_ota_update(port)
     assert booted.startswith(b"STATUS: BOOTED")
 
@@ -278,13 +256,16 @@ def main() -> int:
     parser.add_argument("--image", help="prebuilt app image to send (skips build)")
     args = parser.parse_args()
 
-    _setup_logging()
+    setup_logging()
     if args.image:
         os.environ["BEACON_OTA_IMAGE"] = args.image
 
     t0 = time.monotonic()
     try:
         run_ota_update(args.port, chunk=args.chunk, delay=args.delay)
+    except Skipped as exc:
+        log.warning("SKIP: %s", exc)
+        return SKIP_EXIT
     except (UpdateFailed, subprocess.CalledProcessError) as exc:
         log.error("UPDATE FAILED: %s", exc)
         return 1
