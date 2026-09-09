@@ -25,3 +25,5 @@ target
 .claude
 local/
 .helix
+.venv/
+__pycache__/
