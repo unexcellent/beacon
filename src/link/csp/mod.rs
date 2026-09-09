@@ -63,7 +63,14 @@ impl SerialRead for esp_idf_hal::uart::UartRxDriver<'_> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, ()> {
         let timeout = esp_idf_hal::delay::TickType::new_millis(100).ticks();
         // Disambiguate from this trait method of the same name.
-        esp_idf_hal::uart::UartRxDriver::read(self, buf, timeout).map_err(|_| ())
+        match esp_idf_hal::uart::UartRxDriver::read(self, buf, timeout) {
+            Ok(n) => Ok(n),
+            // esp-idf-hal maps uart_read_bytes()'s empty (0-byte) timeout to
+            // ESP_ERR_TIMEOUT — that is an idle line, not a read failure, so it
+            // must be Ok(0) or poll() misreports every quiet second as UartReceive.
+            Err(e) if e.code() == esp_idf_sys::ESP_ERR_TIMEOUT => Ok(0),
+            Err(_) => Err(()),
+        }
     }
 }
 
