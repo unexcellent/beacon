@@ -56,7 +56,7 @@ run_one() {
     local rcfile; rcfile="$(mktemp)"
 
     if [ "$is_tty" -eq 1 ]; then
-        printf '\033[1m⏳ %s\033[0m\n' "$name"
+        printf '\033[1m… %s\033[0m\n' "$name"
         local i; for ((i=0; i<WINDOW; i++)); do printf '\n'; done
         { "$PY" -u "$file" 2>&1; echo $? >"$rcfile"; } | {
             local -a ring=()
