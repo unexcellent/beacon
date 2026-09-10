@@ -27,6 +27,10 @@ const RGB_CSI: CsiConfig = CsiConfig {
 };
 
 pub fn initialize_rgb_camera() -> Result<Sc850sl<CsiInterface>> {
+    if cfg!(feature = "no-rgb-camera") {
+        log::warn!("RGB camera disabled at compile time (no-rgb-camera feature)");
+        return Err(Error::RgbInit);
+    }
     log::info!("RGB camera: initializing...");
 
     let reset = ResetPin::new(RGB_XSHUTDN_PIN).map_err(|_| Error::RgbInit)?;
@@ -84,6 +88,10 @@ const THERMAL_SPI: SpiFrameConfig = SpiFrameConfig {
 const THERMAL_BOOT_SETTLE_MS: u64 = 2_000;
 
 pub fn initialize_thermal_camera() -> Result<Mi48<SpiFrameInterface>> {
+    if cfg!(feature = "no-thermal-camera") {
+        log::warn!("thermal camera disabled at compile time (no-thermal-camera feature)");
+        return Err(Error::ThermalInit);
+    }
     log::info!("Thermal camera: initializing (MI1602 via MI48Dx)...");
 
     let i2c = EspI2c::new(I2cConfig {

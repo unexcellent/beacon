@@ -11,6 +11,13 @@ rust-version = "1.97"
 name = "beacon"
 harness = false
 
+[features]
+# Pretend a camera is physically absent, at compile time, to exercise the boot
+# init-failure downlink (RgbInit / ThermalInit) without unplugging it. Off by
+# default (both cameras enabled). Build e.g. `cargo build --features no-rgb-camera`.
+no-rgb-camera = []
+no-thermal-camera = []
+
 [profile.release]
 opt-level = "z"
 lto = true
