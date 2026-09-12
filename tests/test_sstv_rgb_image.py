@@ -11,7 +11,7 @@ Requires:
     so the SSTV downlink is a single 320x240 RGB frame.
   - The RGB camera connected and working.
   - I2S capture on the Pi as an ALSA card named 'esp-i2s' (see hosts/odin nix).
-  - `arecord` (alsa-utils) and a prebuilt/buildable sstv-decode.
+  - `arecord` (alsa-utils) and the `sstv` Python package (pip install sstv).
 
 Skips cleanly (exit 77) when the capture card / arecord / toolchain is missing.
 

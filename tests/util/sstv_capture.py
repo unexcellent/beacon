@@ -2,8 +2,8 @@
 """Shared helper for the SSTV image-capture HIL tests (RGB and thermal).
 
 Records the ESP's I2S audio while an SSTV command runs, decodes the Robot36 image
-with the `sstv-decode` tool, validates it looks like a real picture, and saves it
-to tests/captures/<YYYY-MM-DD_HH-MM-SS>_<suffix>.png (timestamp = test start).
+with the `sstv` Python package, validates it looks like a real picture, and saves
+it to tests/captures/<YYYY-MM-DD_HH-MM-SS>_<suffix>.png (timestamp = test start).
 
 Both cameras render into the same Robot36 320x240 frame, so the capture/decode
 path is identical; only the firmware camera selection, filename suffix, and
@@ -22,6 +22,9 @@ import wave
 from datetime import datetime
 from pathlib import Path
 
+import sstv
+from PIL import ImageStat
+
 from tests.util.ota_hil import drain, skip
 from tests.util.payload_board import NODE_PAYLOAD, MockPayloadBoard
 
@@ -29,7 +32,6 @@ log = logging.getLogger("sstv_capture")
 
 REPO = Path(__file__).resolve().parent.parent.parent
 CAPTURES = REPO / "tests" / "captures"
-DECODE_SRC = REPO / "tools" / "sstv-decode"
 
 SAMPLE_RATE = 16000       # ESP audio rate (src/audio/move-iiia.rs)
 RECORD_SECONDS = 42       # Robot36 is ~36 s; record a bit longer
@@ -58,42 +60,51 @@ def alsa_capture_device() -> str:
     skip("no 'esp-i2s' capture card — set up the Pi I2S slave capture first")
 
 
-def sstv_decoder() -> Path:
-    """Locate the sstv-decode binary, or build it as a fallback.
+def read_active_channel(path: Path) -> tuple[list[int], int]:
+    """Read a 16-bit WAV and return (samples, rate) for the loudest channel.
 
-    Prefers a prebuilt binary (shipped by local/deploy_sstv_decode.sh) so the
-    slow Pi never compiles it: $SSTV_DECODE_BIN, then ~/.local/bin/sstv-decode,
-    then $PATH. Only if none exist do we build it locally.
+    The ESP puts the SSTV tones on a single I2S channel and silence on the
+    other, so pick the higher-energy channel rather than the first one.
     """
-    for cand in (os.environ.get("SSTV_DECODE_BIN"),
-                 str(Path.home() / ".local/bin/sstv-decode"),
-                 shutil.which("sstv-decode")):
-        if cand and Path(cand).is_file() and os.access(cand, os.X_OK):
-            return Path(cand)
-
-    if not (DECODE_SRC / "Cargo.toml").is_file():
-        skip("no sstv-decode binary and tools/sstv-decode source not found")
-    if not shutil.which("cargo"):
-        skip("no sstv-decode binary; run local/deploy_sstv_decode.sh from a build host")
-    # Build OUTSIDE the beacon repo so its .cargo/config.toml (riscv target +
-    # build-std) doesn't apply — a clean host build of the decoder.
-    build_dir = Path(tempfile.gettempdir()) / "beacon-sstv-decode"
-    binp = build_dir / "target" / "release" / "sstv-decode"
-    if not binp.is_file():
-        log.info("building sstv-decode locally (no prebuilt binary found) ...")
-        if build_dir.exists():
-            shutil.rmtree(build_dir)
-        shutil.copytree(DECODE_SRC, build_dir)
-        subprocess.run(["cargo", "build", "--release"], cwd=build_dir, check=True)
-    return binp
-
-
-def wav_peak(path: Path) -> int:
-    """Largest absolute 16-bit sample across all channels (0 = silence)."""
     with wave.open(str(path), "rb") as w:
+        channels = max(w.getnchannels(), 1)
+        rate = w.getframerate()
         samples = array.array("h")
         samples.frombytes(w.readframes(w.getnframes()))
+    if channels <= 1:
+        return list(samples), rate
+    energy = [sum(x * x for x in samples[c::channels]) for c in range(channels)]
+    best = max(range(channels), key=energy.__getitem__)
+    return list(samples[best::channels]), rate
+
+
+def wav_peak(samples: list[int]) -> int:
+    """Largest absolute sample (0 = silence)."""
     return max((abs(s) for s in samples), default=0)
+
+
+def image_stats(img) -> tuple[tuple[int, int], list[float], float]:
+    """(size, per-channel stddev, horizontal-neighbour similarity fraction).
+
+    stddev ~0 means a flat/blank frame; a high similarity fraction means a real
+    image (adjacent pixels alike), a low one means noise / a bad decode.
+    """
+    img = img.convert("RGB")
+    w, h = img.size
+    std = ImageStat.Stat(img).stddev
+    px = img.load()
+    similar = pairs = 0
+    for y in range(h):
+        prev = px[0, y]
+        for x in range(1, w):
+            cur = px[x, y]
+            for c in range(3):
+                if abs(cur[c] - prev[c]) <= 24:
+                    similar += 1
+                pairs += 1
+            prev = cur
+    smoothness = similar / pairs if pairs else 0.0
+    return (w, h), std, smoothness
 
 
 def capture_sstv_image(
@@ -111,7 +122,6 @@ def capture_sstv_image(
     Returns the saved PNG path.
     """
     device = alsa_capture_device()
-    decoder = sstv_decoder()
     CAPTURES.mkdir(parents=True, exist_ok=True)
 
     started = datetime.now()  # filename timestamp = test start, not receive time
@@ -143,8 +153,9 @@ def capture_sstv_image(
     if rc not in (0, None):
         log.warning("arecord exited %s", rc)
 
+    samples, rate = read_active_channel(wav)
     # Distinguish a silent capture (clock present, no data) from a decode failure.
-    peak = wav_peak(wav)
+    peak = wav_peak(samples)
     log.info("recorded peak=%d (%.1f%% FS)", peak, 100 * peak / 32768)
     assert peak > 200, (
         f"capture is silent (peak={peak}). The I2S clock is working but no audio data "
@@ -152,12 +163,12 @@ def capture_sstv_image(
         "was not actually transmitting SSTV."
     )
 
-    result = subprocess.run([str(decoder), str(wav), str(png)], capture_output=True, text=True)
-    assert result.returncode == 0, f"SSTV decode failed: {result.stderr.strip()}"
-    w, h, std_r, std_g, std_b, smooth = result.stdout.split()
-    w, h = int(w), int(h)
-    std = (float(std_r), float(std_g), float(std_b))
-    smooth = float(smooth)
+    images = sstv.decode(samples, rate, mode=sstv.Mode.ROBOT_36)
+    assert images, "no SSTV image could be decoded from the recording"
+    img = images[0]
+    img.save(png)
+
+    (w, h), std, smooth = image_stats(img)
     log.info("decoded %dx%d std=(%.0f,%.0f,%.0f) smoothness=%.2f -> %s", w, h, *std, smooth, png)
 
     assert (w, h) == ROBOT36, f"decoded {w}x{h}, expected {ROBOT36}"

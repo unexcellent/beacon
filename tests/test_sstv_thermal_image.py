@@ -13,7 +13,7 @@ Requires:
   - The thermal camera connected and working, pointed at a scene with some
     temperature contrast (e.g. a hand / warm object) so the frame isn't flat.
   - I2S capture on the Pi as an ALSA card named 'esp-i2s' (see hosts/odin nix).
-  - `arecord` (alsa-utils) and a prebuilt/buildable sstv-decode.
+  - `arecord` (alsa-utils) and the `sstv` Python package (pip install sstv).
 
 The thermal frame is rendered grayscale (src/camera/sensors/mi48.rs: R=G=B), so
 it is lower-contrast than a photo — the min_std threshold is a bit lower and may
