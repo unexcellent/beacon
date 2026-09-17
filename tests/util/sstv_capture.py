@@ -41,6 +41,14 @@ def send_sstv_command(board: MockPayloadBoard) -> None:
     log.info("SSTV command sent; ESP is BUSY, transmitting (~36s) ...")
 
 
+def wait_for_available(board: MockPayloadBoard) -> None:
+    """Wait for the ESP's AVAILABLE status, i.e. transmit_sstv finished."""
+    available = board.wait_for_text(b"AVAILABLE", timeout=AVAILABLE_TIMEOUT)
+    assert available is not None and available.dst == NODE_PAYLOAD, (
+        f"no AVAILABLE within {AVAILABLE_TIMEOUT:.0f}s of BUSY — transmit_sstv never finished"
+    )
+
+
 def capture_and_decode(board: MockPayloadBoard, *, camera_hint: str):
     """Record the I2S audio through the transmission, then decode the Robot36 image.
 

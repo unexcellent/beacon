@@ -60,20 +60,44 @@ def wait_reachable(board: MockPayloadBoard, timeout: float = 12.0) -> bool:
     return False
 
 
-def valid_image_prefix(nbytes: int) -> bytes | None:
-    """First `nbytes` of a real ESP app image (valid header), so esp_ota_write
-    accepts the write. Found via BEACON_OTA_IMAGE or a staged /tmp image."""
+def staged_firmware_image() -> bytes:
+    """A real ESP app image staged for the OTA tests, or skip if none is present.
+
+    Found via BEACON_OTA_IMAGE or /tmp/beacon_ota.bin. It must start with the
+    0xE9 ESP image magic, so its leading bytes form a header that esp_ota_write
+    accepts — tests that need a "valid header" slice off the first CHUNK bytes.
+    """
     for path in (os.environ.get("BEACON_OTA_IMAGE"), "/tmp/beacon_ota.bin"):
         if path and Path(path).is_file():
             data = Path(path).read_bytes()
             if data[:1] == b"\xe9":  # ESP image magic
-                return data[:nbytes]
-    return None
+                return data
+    skip("no ESP app image staged (set BEACON_OTA_IMAGE) — needed for a valid header")
 
 
 def drain(board: MockPayloadBoard) -> None:
     while board.receive(timeout=0) is not None:
         pass
+
+
+def send_update_announcement(board: MockPayloadBoard) -> None:
+    drain(board)  # start the session clean: drop any stale frames (e.g. a startup BOOTED)
+    board.update_announce(CHUNK)
+    time.sleep(0.2)
+
+
+def send_update_begin(board: MockPayloadBoard, total: int) -> None:
+    board.update_begin(total)
+    time.sleep(0.2)
+
+
+def send_update_data(board: MockPayloadBoard, offset: int, data: bytes) -> None:
+    board.update_data(offset, data)
+    time.sleep(0.1)
+
+
+def send_update_end(board: MockPayloadBoard) -> None:
+    board.update_end()
 
 
 def expect_update_error(board: MockPayloadBoard, expected_prefix: bytes, timeout: float = 10.0) -> bytes:

@@ -34,15 +34,11 @@ CAMERA_HINT = (
 )
 
 
-def case(board: MockPayloadBoard) -> None:
+def test_rgb_only_transmission(board: MockPayloadBoard) -> None:
     send_sstv_command(board)
     image = capture_and_decode(board, camera_hint=CAMERA_HINT)
     assert_valid_image(image, min_std=6.0, min_smoothness=0.35)
 
 
-def test_rgb_only_transmission(board):
-    case(board)
-
-
 if __name__ == "__main__":
-    sys.exit(run_case(case))
+    sys.exit(run_case(test_rgb_only_transmission))

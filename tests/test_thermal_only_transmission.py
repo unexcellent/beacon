@@ -20,7 +20,7 @@ once a real thermal capture is available.
 
 Skips cleanly (exit 77) when the capture card / arecord is missing.
 
-Run:  ./.venv/bin/python tests/test_sstv_thermal_image.py
+Run:  ./.venv/bin/python tests/test_thermal_only_transmission.py
 """
 
 import sys
@@ -34,20 +34,11 @@ from tests.util.sstv_capture import assert_valid_image, capture_and_decode, send
 CAMERA_HINT = "Is the thermal camera working and RGB disabled (--features no-rgb-camera)?"
 
 
-def case(board: MockPayloadBoard) -> None:
-    # 1. Ask the ESP to transmit the camera image as SSTV.
+def test_thermal_only_transmission(board: MockPayloadBoard) -> None:
     send_sstv_command(board)
-
-    # 2. Capture the I2S audio and decode it into an image.
     image = capture_and_decode(board, camera_hint=CAMERA_HINT)
-
-    # 3. Check the decoded image is a real frame (grayscale thermal is lower-contrast).
     assert_valid_image(image, min_std=5.0, min_smoothness=0.35)
 
 
-def test_sstv_thermal_image(board):
-    case(board)
-
-
 if __name__ == "__main__":
-    sys.exit(run_case(case))
+    sys.exit(run_case(test_thermal_only_transmission))
