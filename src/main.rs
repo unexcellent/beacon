@@ -13,16 +13,14 @@ fn main() {
     let mut link = initialize_payload_link().unwrap();
     let mut audio = initialize_audio_channel().report_if_err(&link).unwrap();
 
-    let cameras = vec![
-        initialize_rgb_camera().report_if_err(&link).ok().map(boxed),
-        initialize_thermal_camera()
-            .report_if_err(&link)
-            .ok()
-            .map(boxed),
-    ];
+    let rgb_camera = initialize_rgb_camera().report_if_err(&link).ok().map(boxed);
+    let thermal_camera = initialize_thermal_camera()
+        .report_if_err(&link)
+        .ok()
+        .map(boxed);
 
     link.send(Message::Available);
-    idle(&mut link, cameras, &mut audio);
+    idle(&mut link, vec![rgb_camera, thermal_camera], &mut audio);
 }
 
 fn initialize_esp32() {
