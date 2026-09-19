@@ -8,12 +8,13 @@
 //! [`esp`]. `Camera` is the outward lifecycle; `CameraInterface` is the inward
 //! platform boundary the sensors depend on.
 
-mod auto_exposure;
+pub mod auto_exposure;
 #[cfg(target_os = "espidf")]
 pub mod esp;
 mod format;
 mod image;
 pub mod interface;
+pub mod raw10;
 pub mod sensors;
 
 /// MOVE-IIIa carrier bring-up.

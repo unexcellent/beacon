@@ -15,6 +15,8 @@
 #[cfg(target_os = "espidf")]
 pub mod csp;
 mod kiss;
+#[cfg(target_os = "espidf")]
+pub mod payload;
 
 mod command;
 mod message;
