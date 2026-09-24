@@ -43,7 +43,8 @@ unsafe impl libcsp::CspArch for EspArch {
 
     fn bin_sem_wait(&self, sem: *mut c_void, _timeout: u32) -> bool {
         let f = unsafe { &*(sem as *const AtomicBool) };
-        f.compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed).is_ok()
+        f.compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
     }
 
     fn bin_sem_post(&self, sem: *mut c_void) -> bool {
@@ -90,9 +91,7 @@ unsafe impl libcsp::CspArch for EspArch {
         let q = unsafe { &mut *(queue as *mut EspQueue) };
         match q.buf.pop_front() {
             Some(v) => {
-                unsafe {
-                    core::ptr::copy_nonoverlapping(v.as_ptr(), item as *mut u8, q.item_size)
-                };
+                unsafe { core::ptr::copy_nonoverlapping(v.as_ptr(), item as *mut u8, q.item_size) };
                 true
             }
             None => false,

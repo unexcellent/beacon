@@ -7,10 +7,6 @@ edition = "2024"
 resolver = "2"
 rust-version = "1.97"
 
-[[bin]]
-name = "beacon"
-harness = false
-
 [profile.release]
 opt-level = "z"
 lto = true
@@ -22,22 +18,33 @@ debug = true
 strip = "debuginfo"
 opt-level = "z"
 
+[lints.rust]
+# `libcsp::export_arch!` expands a `cfg(feature = "ropi-rwpi")` this crate does
+# not declare; mark it expected so the unexpected-cfg lint stays quiet.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("ropi-rwpi"))'] }
+
 [patch.crates-io]
 esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys.git" }
 esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal.git" }
 esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git" }
 
 [dependencies]
+embedded-hal = "1"
 log = "0.4"
+sstv = { version = "0.1", default-features = false }
+
+# Platform crates. Gated on the ESP-IDF target so the library still builds for
+# the host, where the trait-driven logic (idle/transmit_sstv/update) is tested.
+[target.'cfg(target_os = "espidf")'.dependencies]
 esp-idf-sys = "0.37"
 esp-idf-hal = "0.46"
 esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
-sstv = { git = "https://github.com/unexcellent/sstv.git", branch = "main" }
 libcsp = { git = "https://github.com/xarantolus/libcsp_rust", rev = "16ba62b127ba431aa03516a1322592d257d37789", default-features = false, features = ["external-arch"] }
 
 [build-dependencies]
-embuild = "0.33"
-image = { version = "0.25", default-features = false, features = ["png"] }
+# `espidf` feature enabled unconditionally so `embuild::espidf` resolves on the
+# host build too; build.rs only calls into it for the ESP-IDF target.
+embuild = { version = "0.33", features = ["espidf"] }
 
 [package.metadata.esp-idf-sys]
 extra_components = [

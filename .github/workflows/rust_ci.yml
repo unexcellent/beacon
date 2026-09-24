@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - dev
     paths-ignore:
       - "**/README.md"
   pull_request:
@@ -11,22 +12,27 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
+  # beacon is a library. Its portable logic is checked and tested on the host;
+  # esp-idf-sys is a `cfg(target_os = "espidf")` dependency, so no ESP-IDF is
+  # needed here. The espidf-gated modules are compiled downstream by the
+  # per-carrier firmware crates.
   rust-checks:
-    name: Rust Checks
+    name: Rust Checks (host)
     runs-on: ubuntu-latest
+    env:
+      TARGET: x86_64-unknown-linux-gnu
     strategy:
       fail-fast: false
       matrix:
         action:
-          - command: build
-            args: --release
           - command: fmt
             args: --all -- --check --color always
           - command: clippy
-            args: --all-targets --all-features --workspace -- -D warnings
+            args: --all-targets --all-features --target x86_64-unknown-linux-gnu -- -D warnings
+          - command: test
+            args: --lib --target x86_64-unknown-linux-gnu
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -37,7 +43,5 @@ jobs:
           components: rust-src rustfmt clippy
       - name: Enable caching
         uses: Swatinem/rust-cache@v2
-      - name: Install ldproxy
-        run: cargo install ldproxy
       - name: Run command
         run: cargo ${{ matrix.action.command }} ${{ matrix.action.args }}

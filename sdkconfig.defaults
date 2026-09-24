@@ -5,6 +5,11 @@ CONFIG_PARTITION_TABLE_TWO_OTA=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# Keep the UART ISR runnable while flash is erased/written: OTA update chunks
+# stream in over UART1 during esp_ota_write, and with the ISR in flash every
+# sector erase blacks out RX long enough to overflow the 128 B hardware FIFO
+# (observed as a lost/truncated chunk right after each 4 KB boundary).
+CONFIG_UART_ISR_IN_IRAM=y
 CONFIG_I2C_SKIP_LEGACY_CONFLICT_CHECK=y
 CONFIG_FREERTOS_HZ=1000
 CONFIG_SPIRAM=y
