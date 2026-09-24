@@ -27,7 +27,7 @@ mod message;
 pub mod move_iiia;
 
 pub use command::Command;
-pub use message::Message;
+pub use message::{Dest, Message, Routes};
 
 use crate::error::Result;
 

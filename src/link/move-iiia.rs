@@ -10,7 +10,7 @@ use esp_idf_hal::{
 
 use super::csp::{CspLink, CspLinkConfig};
 use super::payload::PayloadLink;
-use super::{CommandLink, NODE};
+use super::{CommandLink, NODE, Routes};
 use crate::error::{Error, Result};
 
 const LINK_BAUD_RATE: u32 = 115_200;
@@ -46,5 +46,5 @@ pub fn initialize_payload_link(peripherals: Peripherals) -> Result<impl CommandL
     )
     .map_err(|_| Error::CspInit)?;
 
-    PayloadLink::try_new(csp)
+    PayloadLink::try_new(csp, Routes::MOVE_IIIA)
 }

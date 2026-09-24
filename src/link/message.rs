@@ -4,12 +4,34 @@ use std::borrow::Cow;
 
 use crate::error::Error;
 
-const PAYLOAD_NODE: u16 = 14;
-const PAYLOAD_PORT: u8 = 1;
-const OBC_NODE: u16 = 1;
-const OBC_PORT: u8 = 1;
-const UHF_GROUND_NODE: u16 = 2;
-const UHF_GROUND_PORT: u8 = 1;
+/// A destination on the CSP network: which node, and which port on it.
+#[derive(Clone, Copy)]
+pub struct Dest {
+    pub node: u16,
+    pub port: u8,
+}
+
+/// Where each class of outbound [`Message`] is routed. Supplied by the firmware
+/// at link bring-up so a different mission can re-target the payload without
+/// editing this crate.
+#[derive(Clone, Copy)]
+pub struct Routes {
+    /// `Available` / `Busy` status.
+    pub payload: Dest,
+    /// `Booted` firmware-identity announcement.
+    pub obc: Dest,
+    /// `Error` reports.
+    pub uhf_ground: Dest,
+}
+
+impl Routes {
+    /// The MOVE-IIIa network map.
+    pub const MOVE_IIIA: Routes = Routes {
+        payload: Dest { node: 14, port: 1 },
+        obc: Dest { node: 1, port: 1 },
+        uhf_ground: Dest { node: 2, port: 1 },
+    };
+}
 
 /// Messages that can be transmitted via the payload link
 pub enum Message {
@@ -25,21 +47,12 @@ pub enum Message {
 }
 
 impl Message {
-    /// Return the destination CSP node.
-    pub fn node(&self) -> u16 {
+    /// Resolve this message's destination against the firmware's network map.
+    pub fn dest(&self, routes: &Routes) -> Dest {
         match self {
-            Self::Available | Self::Busy => PAYLOAD_NODE,
-            Self::Booted(_) => OBC_NODE,
-            Self::Error(_) => UHF_GROUND_NODE,
-        }
-    }
-
-    /// Return the destination CSP port.
-    pub fn port(&self) -> u8 {
-        match self {
-            Self::Available | Self::Busy => PAYLOAD_PORT,
-            Self::Booted(_) => OBC_PORT,
-            Self::Error(_) => UHF_GROUND_PORT,
+            Self::Available | Self::Busy => routes.payload,
+            Self::Booted(_) => routes.obc,
+            Self::Error(_) => routes.uhf_ground,
         }
     }
 

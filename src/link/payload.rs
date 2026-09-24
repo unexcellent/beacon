@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use super::command::parse_update_packet;
 use super::csp::{CspLink, SerialRead};
 use super::kiss;
-use super::{Command, CommandLink, Message};
+use super::{Command, CommandLink, Message, Routes};
 use crate::error::{Error, Result};
 
 const UPDATE_PORT: u8 = 10;
@@ -20,14 +20,17 @@ pub struct PayloadLink<R> {
     csp: CspLink<R>,
     update_sock: libcsp::Socket,
     cmd_sock: libcsp::Socket,
+    /// Where each outbound [`Message`] class is routed.
+    routes: Routes,
     /// Commands already received but not yet handed out by [`Self::receive`].
     commands: VecDeque<Command>,
 }
 
 impl<R: SerialRead> PayloadLink<R> {
-    /// Bind the update / command service sockets on the brought-up CSP node. The
-    /// node owns the serial transport and is pumped via its `poll`.
-    pub fn try_new(csp: CspLink<R>) -> Result<Self> {
+    /// Bind the update / command service sockets on the brought-up CSP node and
+    /// route outbound messages via `routes`. The node owns the serial transport
+    /// and is pumped via its `poll`.
+    pub fn try_new(csp: CspLink<R>, routes: Routes) -> Result<Self> {
         let update_sock = csp.bind(UPDATE_PORT).map_err(|_| Error::CspInit)?;
         let cmd_sock = csp.bind(CMD_PORT).map_err(|_| Error::CspInit)?;
 
@@ -35,6 +38,7 @@ impl<R: SerialRead> PayloadLink<R> {
             csp,
             update_sock,
             cmd_sock,
+            routes,
             commands: VecDeque::new(),
         })
     }
@@ -64,15 +68,16 @@ impl<R: SerialRead> PayloadLink<R> {
 impl<R: SerialRead> CommandLink for PayloadLink<R> {
     /// KISS-encodes the message and writes it to the serial link before returning.
     fn send(&self, message: Message) {
+        let dest = message.dest(&self.routes);
         log::info!(
             "Sending '{}' to {}:{}",
             String::from_utf8_lossy(&message.payload()),
-            message.node(),
-            message.port()
+            dest.node,
+            dest.port
         );
         self.csp.send(
-            message.node(),
-            message.port(),
+            dest.node,
+            dest.port,
             libcsp::Priority::Norm,
             &message.payload(),
         );
