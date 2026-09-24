@@ -4,8 +4,8 @@
 //! sensor/DAC traits, chip drivers over `embedded-hal`, and ESP32-P4 transports.
 //! On top of them sit the mission pieces: the payload [`link`] (CSP over KISS),
 //! the crate-wide [`error`] type, firmware [`update`], SSTV [`transmit_sstv`],
-//! and the [`idle`] command loop. Only board bring-up and `main` live in the
-//! binary.
+//! and the [`idle`] command loop. Board bring-up and `main` live in the
+//! per-carrier firmware crates (`beacon-on-moveiiia`, `beacon-on-tab5`).
 
 pub mod audio;
 pub mod camera;

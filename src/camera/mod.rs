@@ -17,11 +17,6 @@ pub mod interface;
 pub mod raw10;
 pub mod sensors;
 
-/// MOVE-IIIa carrier bring-up.
-#[cfg(target_os = "espidf")]
-#[path = "move-iiia.rs"]
-pub mod move_iiia;
-
 pub use format::{BayerOrder, ColorCalibration, FrameFormat, PixelFormat};
 pub use image::Image;
 pub use interface::CameraInterface;
