@@ -126,12 +126,12 @@ pub(crate) const SCRIPT_EXHAUSTED: &str = "scripted link exhausted (test sentine
 
 /// A [`CommandLink`] that returns a scripted sequence of `receive` results and
 /// records every message sent.
-pub(crate) struct ScriptedLink {
+pub(crate) struct FakeLink {
     inbound: VecDeque<Result<Option<Command>>>,
     sent: RefCell<Vec<Message>>,
 }
 
-impl ScriptedLink {
+impl FakeLink {
     pub(crate) fn new(inbound: Vec<Result<Option<Command>>>) -> Self {
         Self {
             inbound: inbound.into(),
@@ -145,7 +145,7 @@ impl ScriptedLink {
     }
 }
 
-impl CommandLink for ScriptedLink {
+impl CommandLink for FakeLink {
     fn send(&self, message: Message) {
         self.sent.borrow_mut().push(message);
     }

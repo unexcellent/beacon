@@ -51,14 +51,14 @@ mod tests {
     use crate::camera::Camera;
     use crate::error::{Error, Result};
     use crate::link::Command;
-    use crate::test_support::{FakeAudio, ScriptedLink, ok};
+    use crate::test_support::{FakeAudio, FakeLink, ok};
 
     /// Drive `idle` (which never returns) until the scripted link is exhausted
     /// and panics the loop, then hand back the link for message inspection.
     /// Uses no cameras so the SSTV path is a fast no-op and only the command
     /// dispatch is under test.
-    fn run_idle(script: Vec<Result<Option<Command>>>) -> ScriptedLink {
-        let mut link = ScriptedLink::new(script);
+    fn run_idle(script: Vec<Result<Option<Command>>>) -> FakeLink {
+        let mut link = FakeLink::new(script);
         let mut audio = FakeAudio::new();
         let cameras: Vec<Option<Box<dyn Camera>>> = Vec::new();
 
