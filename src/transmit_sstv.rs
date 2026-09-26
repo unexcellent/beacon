@@ -69,17 +69,16 @@ mod tests {
     #[test]
     fn single_camera_captures_then_encodes_and_flushes_once() {
         let (camera, log) = FakeCamera::boxed();
-        let mut cameras = vec![Some(camera)];
         let mut audio = FakeAudio::new();
 
-        transmit_sstv(&mut cameras, &mut audio).expect("transmission");
+        transmit_sstv(&mut vec![Some(camera)], &mut audio).expect("transmission");
 
         assert_eq!(
             log.calls(), // contains all method calls of FakeCamera
             ["power_on", "calibrate", "receive_frame", "power_off"]
         );
         assert_eq!(audio.completed_transmissions(), 1);
-        assert!(audio.samples > 0, "encoder should produce samples");
+        assert!(audio.samples > 0);
     }
 
     #[test]

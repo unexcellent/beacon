@@ -13,7 +13,7 @@ use crate::error::Result;
 use crate::link::{Command, CommandLink, Message};
 
 /// Robot36 expects a 320x240 frame, so build one that `Encoder::new` accepts.
-pub(crate) fn robot36_frame() -> Image {
+pub(crate) fn fake_robot36_frame() -> Image {
     let (w, h) = (320, 240);
     Image::from_pixels(w, h, vec![RgbPixel::new(0, 128, 255); w * h])
 }
@@ -21,9 +21,18 @@ pub(crate) fn robot36_frame() -> Image {
 /// The order of lifecycle calls a [`FakeCamera`] received, e.g.
 /// `["power_on", "calibrate", "receive_frame", "power_off"]`. Stays readable
 /// after the camera is handed off to the code under test.
+#[derive(Clone)]
 pub(crate) struct CallLog(Rc<RefCell<Vec<&'static str>>>);
 
 impl CallLog {
+    pub(crate) fn new() -> Self {
+        Self(Rc::new(RefCell::new(Vec::new())))
+    }
+
+    pub(crate) fn append_call(&self, call: &'static str) {
+        self.0.borrow_mut().push(call);
+    }
+
     pub(crate) fn calls(&self) -> Vec<&'static str> {
         self.0.borrow().clone()
     }
@@ -41,30 +50,30 @@ pub(crate) fn missing_camera() -> Option<Box<dyn Camera>> {
 
 /// A camera that records its lifecycle calls and yields a fixed frame.
 pub(crate) struct FakeCamera {
-    log: Rc<RefCell<Vec<&'static str>>>,
+    log: CallLog,
 }
 
 impl FakeCamera {
     /// Returns the boxed camera and a handle to its call log.
     pub(crate) fn boxed() -> (Box<dyn Camera>, CallLog) {
-        let log = Rc::new(RefCell::new(Vec::new()));
-        (Box::new(Self { log: log.clone() }), CallLog(log))
+        let log = CallLog::new();
+        (Box::new(Self { log: log.clone() }), log)
     }
 }
 
 impl Camera for FakeCamera {
     fn power_on(&mut self) {
-        self.log.borrow_mut().push("power_on");
+        self.log.append_call("power_on");
     }
     fn power_off(&mut self) {
-        self.log.borrow_mut().push("power_off");
+        self.log.append_call("power_off");
     }
     fn calibrate(&mut self) {
-        self.log.borrow_mut().push("calibrate");
+        self.log.append_call("calibrate");
     }
     fn receive_frame(&mut self) -> Image {
-        self.log.borrow_mut().push("receive_frame");
-        robot36_frame()
+        self.log.append_call("receive_frame");
+        fake_robot36_frame()
     }
 }
 
