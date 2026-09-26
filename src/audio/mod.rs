@@ -2,22 +2,21 @@
 //! and pushed to the hardware.
 //!
 //! [`AudioChannel`] is the application-facing role — what an SSTV synthesiser
-//! needs: a sample rate and a place to send samples. [`Pcm5102a`] implements it
-//! for the PCM5102A DAC, generic over an [`AudioInterface`] that moves the packed
-//! bytes to hardware. [`I2sInterface`] is the ESP32-P4 I2S implementation; all
-//! platform code lives there, so the DAC driver itself is platform-agnostic.
+//! needs: a sample rate and a place to send samples. A concrete DAC driver
+//! implements it, generic over an [`AudioInterface`] that moves the packed bytes
+//! to hardware. [`I2sInterface`] is the ESP32-P4 I2S implementation; all platform
+//! code lives there, so a DAC driver stays platform-agnostic. The concrete DAC
+//! drivers live in the per-carrier firmware crates.
 
 mod encoder;
 #[cfg(target_os = "espidf")]
 mod i2s;
 mod interface;
-mod pcm5102a;
 
 pub use encoder::AudioEncoder;
 #[cfg(target_os = "espidf")]
 pub use i2s::{I2sConfig, I2sInterface};
 pub use interface::AudioInterface;
-pub use pcm5102a::Pcm5102a;
 
 /// Error raised by the audio channel.
 #[derive(Clone, Copy, Debug)]
@@ -29,7 +28,7 @@ pub enum AudioError {
 }
 
 /// A place to send a mono `i16` sample stream. Implemented by a concrete DAC
-/// driver ([`Pcm5102a`]); the SSTV synthesiser drives whatever satisfies this.
+/// driver; the SSTV synthesiser drives whatever satisfies this.
 pub trait AudioChannel {
     /// The sample rate the DAC is clocked at, in Hz. The synthesiser must
     /// generate samples at this rate.

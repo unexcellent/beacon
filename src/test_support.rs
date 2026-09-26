@@ -18,6 +18,27 @@ pub(crate) fn robot36_frame() -> Image {
     Image::from_pixels(w, h, vec![RgbPixel::new(0, 128, 255); w * h])
 }
 
+/// The order of lifecycle calls a [`FakeCamera`] received, e.g.
+/// `["power_on", "calibrate", "receive_frame", "power_off"]`. Stays readable
+/// after the camera is handed off to the code under test.
+pub(crate) struct CallLog(Rc<RefCell<Vec<&'static str>>>);
+
+impl CallLog {
+    pub(crate) fn calls(&self) -> Vec<&'static str> {
+        self.0.borrow().clone()
+    }
+}
+
+/// A camera slot holding a working [`FakeCamera`] whose call log is not needed.
+pub(crate) fn working_camera() -> Option<Box<dyn Camera>> {
+    Some(FakeCamera::boxed().0)
+}
+
+/// A camera slot whose camera failed to initialize.
+pub(crate) fn missing_camera() -> Option<Box<dyn Camera>> {
+    None
+}
+
 /// A camera that records its lifecycle calls and yields a fixed frame.
 pub(crate) struct FakeCamera {
     log: Rc<RefCell<Vec<&'static str>>>,
@@ -25,24 +46,24 @@ pub(crate) struct FakeCamera {
 
 impl FakeCamera {
     /// Returns the boxed camera and a handle to its call log.
-    pub(crate) fn boxed() -> (Box<dyn Camera>, Rc<RefCell<Vec<&'static str>>>) {
+    pub(crate) fn boxed() -> (Box<dyn Camera>, CallLog) {
         let log = Rc::new(RefCell::new(Vec::new()));
-        (Box::new(Self { log: log.clone() }), log)
+        (Box::new(Self { log: log.clone() }), CallLog(log))
     }
 }
 
 impl Camera for FakeCamera {
     fn power_on(&mut self) {
-        self.log.borrow_mut().push("on");
+        self.log.borrow_mut().push("power_on");
     }
     fn power_off(&mut self) {
-        self.log.borrow_mut().push("off");
+        self.log.borrow_mut().push("power_off");
     }
     fn calibrate(&mut self) {
-        self.log.borrow_mut().push("cal");
+        self.log.borrow_mut().push("calibrate");
     }
     fn receive_frame(&mut self) -> Image {
-        self.log.borrow_mut().push("recv");
+        self.log.borrow_mut().push("receive_frame");
         robot36_frame()
     }
 }
@@ -51,11 +72,17 @@ impl Camera for FakeCamera {
 /// to start failing `transmit` after a given number of samples.
 pub(crate) struct FakeAudio {
     pub(crate) samples: usize,
-    pub(crate) flushes: usize,
+    flushes: usize,
     fail_after: Option<usize>,
 }
 
 impl FakeAudio {
+    /// Number of completed SSTV transmissions. `transmit_image` ends every
+    /// image with exactly one `flush()`, so counting flushes counts images.
+    pub(crate) fn completed_transmissions(&self) -> usize {
+        self.flushes
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             samples: 0,

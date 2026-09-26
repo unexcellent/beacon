@@ -1,12 +1,12 @@
-//! Camera abstraction: the application-facing [`Camera`] lifecycle and the two
-//! cameras that implement it.
+//! Camera abstraction: the application-facing [`Camera`] lifecycle and the
+//! building blocks a sensor driver is written against.
 //!
-//! Each camera is a sensor driver ([`Sc850sl`](sensors::Sc850sl) for RGB,
-//! [`Mi48`](sensors::Mi48) for thermal) that owns a [`CameraInterface`] and a
-//! pixel pipeline. The drivers carry no platform code — all ESP32-P4 logic (the
-//! I2C bus and the CSI/SPI frame transport) lives behind the interface, in
-//! [`esp`]. `Camera` is the outward lifecycle; `CameraInterface` is the inward
-//! platform boundary the sensors depend on.
+//! A sensor driver owns a [`CameraInterface`] and a pixel pipeline and carries
+//! no platform code — all ESP32-P4 logic (the I2C bus and the CSI/SPI frame
+//! transport) lives behind the interface, in [`esp`]. `Camera` is the outward
+//! lifecycle; `CameraInterface` is the inward platform boundary the sensors
+//! depend on. The concrete sensor drivers live in the per-carrier firmware
+//! crates.
 
 pub mod auto_exposure;
 #[cfg(target_os = "espidf")]
@@ -15,7 +15,6 @@ mod format;
 mod image;
 pub mod interface;
 pub mod raw10;
-pub mod sensors;
 
 pub use format::{BayerOrder, ColorCalibration, FrameFormat, PixelFormat};
 pub use image::Image;
