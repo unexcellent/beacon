@@ -31,7 +31,7 @@ esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git" }
 [dependencies]
 embedded-hal = "1"
 log = "0.4"
-sstv = { version = "0.1", default-features = false }
+sstv = { version = "0.2", default-features = false, features = ["alloc"] }
 
 # Platform crates. Gated on the ESP-IDF target so the library still builds for
 # the host, where the trait-driven logic (idle/transmit_sstv/update) is tested.
